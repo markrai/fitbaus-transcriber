@@ -1,6 +1,8 @@
 *
 !requirements-cpu.txt
 !LICENSE
+!licenses/
+!licenses/whisper-MIT.txt
 !transcriber/
 !transcriber/**
 **/__pycache__
