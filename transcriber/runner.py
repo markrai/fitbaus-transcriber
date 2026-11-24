@@ -17,8 +17,12 @@ class JobRunner:
         self.directory = directory
         self.transcribe = transcribe
 
-    def submit(self, item_id, token, start_ms, end_ms):
+    def submit(self, item_id, token, start_ms, end_ms, expected_revision=None, expected_source=None):
         manifest = self.source.manifest(item_id, token)
+        if expected_source is not None and manifest.identity.source_id != expected_source:
+            raise SourceError("not_found")
+        if expected_revision is not None and manifest.identity.audio_revision != expected_revision:
+            raise SourceError("stale_revision")
         spec = JobSpec(manifest.identity, start_ms, end_ms, engine_profile(self.engine.config))
         if end_ms > manifest.duration_ms:
             raise ValueError("Transcript window exceeds audiobook")
@@ -56,9 +60,13 @@ class JobRunner:
                 self.store.fail(job_id, "internal_error")
                 raise
 
-    def result(self, job_id, token):
+    def status(self, job_id, token):
         job = self.store.get(job_id)
         self._authorize(job, token)
+        return job
+
+    def result(self, job_id, token):
+        job = self.status(job_id, token)
         if job.state != "ready":
             raise QueueError("job_not_ready")
         self.store.touch(job_id)
