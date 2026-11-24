@@ -79,8 +79,8 @@ class ApiTests(unittest.TestCase):
             raise EngineError("inference_failed")
         return TranscriptWindow(identity, start, end, (Cue(start, end, "Narration"),))
 
-    def request(self, method, path, body=None, operator=OPERATOR, user=USER):
-        headers = {}
+    def request(self, method, path, body=None, operator=OPERATOR, user=USER, extra_headers=None):
+        headers = dict(extra_headers or {})
         if operator is not None:
             headers["Authorization"] = "Bearer " + operator
         if user is not None:
@@ -137,6 +137,22 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/v1/items/book/background")[1]["jobs"][0]["job_id"], job["job_id"])
         self.assertEqual(self.request("POST", route + "/discard")[0], 200)
         self.assertEqual(self.request("GET", route)[0], 404)
+
+    def test_unattended_authorization_is_local_operator_only(self):
+        self.server.background.check_model = lambda *args, **kwargs: None
+        self.server.background.execute = lambda *args: (_ for _ in ()).throw(EngineError("test_stop"))
+        code = self.server.pairing.issue()
+        status, redeemed = self.server.pairing.redeem(code)
+        self.assertEqual(status, 200)
+        body = {"source_id": "home", "item_id": "book", "audio_revision": IDENTITY.audio_revision, "model": "tiny"}
+        headers = {"X-FitBaus-Background-Lease": "24h", "X-FitBaus-Background-Refresh": "private-refresh"}
+        self.assertEqual(self.request("POST", "/v1/background", body, operator=redeemed["token"], extra_headers=headers)[0], 401)
+        self.assertEqual(self.request("POST", "/v1/background", body, extra_headers={"X-FitBaus-Background-Refresh": "private-refresh"})[0], 400)
+        status, result = self.request("POST", "/v1/background", body, extra_headers=headers)
+        self.assertEqual(status, 202)
+        self.assertGreater(result["authorization_remaining_seconds"], 86000)
+        self.assertTrue(result["authorization_renewable"])
+        self.assertNotIn("private-refresh", json.dumps(result))
 
     def test_prepared_window_uses_actual_profile_without_live_inference(self):
         prepared = self.server.background.store
