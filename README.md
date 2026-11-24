@@ -75,12 +75,12 @@ See [hardware qualification](docs/QUALIFICATION.md) for the timing and memory ad
 ### Prepare an audiobook in the background
 
 ```sh
-docker compose exec transcriber python -m transcriber background-start --item-id BOOK_ID --model small --unattended
+docker compose exec transcriber python -m transcriber background-start --item-id BOOK_ID --model small
 docker compose exec transcriber python -m transcriber background-status --job-id JOB_ID
-docker compose exec transcriber python -m transcriber background-resume --job-id JOB_ID --unattended
+docker compose exec transcriber python -m transcriber background-resume --job-id JOB_ID
 ```
 
-Choose username/password (default) or an existing access token/API key at the interactive prompt. Passwords are exchanged directly with the configured Audiobookshelf server and are never saved. HTTPS is recommended; HTTP login requires explicit confirmation. Each job can process a whole book or start at an aligned five-minute offset using `--start-ms`. Live Read Along takes priority and can preempt background work. Completed windows and progress are stored together in a separate bounded database and served directly to Read Along on matching requests, preferring Small, then Base, then Tiny. The optional `--unattended` flag grants up to 24 hours of memory-only authorization and permits renewal with supported Audiobookshelf login sessions. A restart, expired lease or rejected refresh requires an explicit resume. Use `background-list --item-id BOOK_ID`, `background-pause`, `background-cancel` or `background-discard` as needed. See [background job API](docs/BACKGROUND-JOBS.md).
+Choose username/password (default) or an existing access token/API key at the interactive prompt. Passwords are exchanged directly with the configured Audiobookshelf server and are never saved. HTTPS is recommended; HTTP login requires explicit confirmation. Each job can process a whole book or start at an aligned five-minute offset using `--start-ms`. Live Read Along takes priority and can preempt background work. Completed windows and progress are stored together in a separate bounded database and served directly to Read Along on matching requests, preferring Small, then Base, then Tiny. Background start and resume authorize the job for its lifetime in memory, automatically requesting renewable credentials when supported by Audiobookshelf. A restart or rejected source authorization requires an explicit resume. Pause, cancellation, completion and terminal failure release credentials. Use `background-list --item-id BOOK_ID`, `background-pause`, `background-cancel` or `background-discard` as needed. See [background job API](docs/BACKGROUND-JOBS.md).
 
 ## Publishing releases
 
@@ -188,7 +188,7 @@ An exclusive Linux file lock prevents concurrent inference against the same data
 
 Completed and failed jobs are evicted by recency when admission or result storage reaches its limits. Queued and running jobs are never evicted. Each result is capped at 1 MiB. The cache limit counts serialized transcript payloads; SQLite metadata, transaction journal, model files and temporary audio are additional disk usage. SQLite retains allocated pages for reuse after eviction. Use the same queue limits for all invocations sharing the data directory. Do not run this experimental queue on a network filesystem without reliable Linux file locking.
 
-The HTTP dispatcher runs one inference job at a time, prioritizing live requests over background work. Live pending credentials expire after ten minutes; explicit local unattended background sessions support renewal and a bounded 24-hour lease. Running inference supports supervised cancellation. Use `discard-job --job-id YOUR_JOB_ID` locally (when no worker owns the data directory) to remove abandoned queued or failed jobs for deleted or inaccessible items.
+The HTTP dispatcher runs one inference job at a time, prioritizing live requests over background work. Live pending credentials expire after ten minutes; background credentials remain in memory until the authorized job ends or is stopped, and supported local login sessions renew automatically. Running inference supports supervised cancellation. Use `discard-job --job-id YOUR_JOB_ID` locally (when no worker owns the data directory) to remove abandoned queued or failed jobs for deleted or inaccessible items.
 
 ## API
 
