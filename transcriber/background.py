@@ -5,10 +5,12 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import shutil
+import tempfile
 import threading
 import time
 
-from .audiobookshelf import SourceError
+from .audiobookshelf import SourceError, MAX_TRACK_BYTES
 from .contract import AudioIdentity, MAX_WINDOW_MS, TranscriptWindow
 from .engine import EngineError, WhisperCpuEngine
 from .inference_process import supervised_window
@@ -185,6 +187,9 @@ class Background:
         self.control = None
         self.closed = False
         self.defer_until = 0
+        self.spool = None
+        self.spool_key = None
+        self.spool_ready = False
 
     def authorize(self, job, token, exact=True):
         manifest = self.runner.source.manifest(job.identity.item_id, token)
@@ -273,7 +278,31 @@ class Background:
                 self.pending.move_to_end(job_id)
                 self.current, self.control = job_id, control
                 return job, token
+            if self.current is None:
+                self.drop_spool()
             return None
+
+    def drop_spool(self):
+        if self.spool is not None:
+            self.spool.close()
+        self.spool = None
+        self.spool_key = None
+        self.spool_ready = False
+
+    def prepare_spool(self, job, manifest, end):
+        track = next((t for t in manifest.tracks if t.offset_ms <= job.cursor_ms
+                      and end <= t.offset_ms + t.duration_ms), None)
+        if track is None or track.size > MAX_TRACK_BYTES:
+            self.drop_spool()
+            return None
+        key = (job.id, track.file_id)
+        if self.spool_key != key:
+            self.drop_spool()
+            if shutil.disk_usage(self.runner.directory).free < track.size + 256 * 1024 * 1024:
+                raise QueueError("background_disk_full")
+            self.spool = tempfile.TemporaryFile(dir=self.runner.directory)
+            self.spool_key = key
+        return self.spool.fileno(), track.file_id, self.spool_ready
 
     def preempt(self):
         with self.lock:
@@ -285,12 +314,16 @@ class Background:
             with self.runner.store.worker() as fd:
                 if control.cancelled():
                     return
-                self.authorize(job, token)
+                manifest = self.authorize(job, token)
                 self.check_model(job.model)
                 engine = WhisperCpuEngine(self.runner.directory, self.config, model_name=job.model)
                 end = min(job.cursor_ms + MAX_WINDOW_MS, job.duration_ms)
-                window = self.execute(self.runner.source, job.identity, token, self.runner.directory,
-                                      engine, job.cursor_ms, end, control.cancelled, fd)
+                spool = self.prepare_spool(job, manifest, end) if self.execute is supervised_window else None
+                args = (self.runner.source, job.identity, token, self.runner.directory,
+                        engine, job.cursor_ms, end, control.cancelled, fd)
+                window = self.execute(*args, spool=spool) if spool is not None else self.execute(*args)
+                if spool is not None:
+                    self.spool_ready = True
                 self.authorize(job, token)
                 with self.lock:
                     if not control.cancelled():
@@ -317,6 +350,8 @@ class Background:
             with self.lock:
                 self.current = None
                 self.control = None
+                if not self.spool_ready or job.id not in self.pending or self.closed:
+                    self.drop_spool()
             with control.gate:
                 control.finished = True
 
