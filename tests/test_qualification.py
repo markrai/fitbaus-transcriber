@@ -1,12 +1,16 @@
+import hashlib
 import io
+import json
+import sys
+import threading
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 import wave
 
-from transcriber.engine import EngineConfig
-from transcriber.qualification import classify, inventory, load_record, parse_sample, qualify
+from transcriber.engine import EngineConfig, EngineError
+from transcriber.qualification import classify, inventory, load_record, measure, parse_sample, qualify
 from transcriber.resources import MIB, Resources, admission, fingerprint, required_bytes, snapshot
 
 
@@ -64,6 +68,42 @@ class QualificationTests(unittest.TestCase):
         self.assertNotEqual(first, fingerprint("tiny", EngineConfig(cpu_threads=3), resources()))
         self.assertNotEqual(first, fingerprint("tiny", config, resources(quota=1)))
         self.assertNotEqual(first, fingerprint("tiny", config, resources(limit=4096)))
+
+    def test_worker_receives_entire_sample_after_poll_deadline(self):
+        for seconds in (6, 300):
+            with self.subTest(seconds=seconds), tempfile.TemporaryFile() as lock:
+                raw = sample(seconds)
+                expected = hashlib.sha256(raw).hexdigest()
+                code = (
+                    "import hashlib, sys, time\n"
+                    "time.sleep(0.25)\n"
+                    "data = sys.stdin.buffer.read()\n"
+                    f"assert len(data) == {len(raw)}\n"
+                    f"assert hashlib.sha256(data).hexdigest() == {expected!r}\n"
+                    f"print({json.dumps(measured())!r})\n"
+                )
+                result = measure(Path("/unused"), "tiny", EngineConfig(), raw,
+                                 lock.fileno(), timeout=5,
+                                 command=[sys.executable, "-c", code])
+                self.assertEqual(result["word_count"], 700)
+
+    def test_worker_timeout_and_cancellation(self):
+        raw = sample(6)
+        code = "import time; time.sleep(60)"
+        with tempfile.TemporaryFile() as lock:
+            with self.assertRaisesRegex(EngineError, "benchmark_timeout"):
+                measure(Path("/unused"), "tiny", EngineConfig(), raw, lock.fileno(),
+                        timeout=0.2, command=[sys.executable, "-c", code])
+            event = threading.Event()
+            timer = threading.Timer(0.2, event.set)
+            timer.start()
+            try:
+                with self.assertRaisesRegex(EngineError, "cancelled"):
+                    measure(Path("/unused"), "tiny", EngineConfig(), raw, lock.fileno(),
+                            timeout=5, cancelled=event.is_set,
+                            command=[sys.executable, "-c", code])
+            finally:
+                timer.cancel()
 
     def test_sample_bounds_and_probe(self):
         raw = sample(2)
