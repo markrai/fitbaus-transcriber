@@ -97,6 +97,24 @@ def main():
         assert request("POST", "/v1/jobs", body)[0] == 200
         assert request("GET", route + "/transcript", token="denied")[0] == 403
         print(json.dumps({"state": "ready", "cue_count": len(result["cues"]), "text": text}))
+        background_body = {key: manifest[key] for key in ("source_id", "item_id", "audio_revision")}
+        background_body["model"] = "tiny"
+        code, background = request("POST", "/v1/background", background_body)
+        assert code in (200, 202), background
+        route = "/v1/background/" + background["job_id"]
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            code, background = request("GET", route)
+            assert code == 200, background
+            if background["state"] == "completed":
+                break
+            assert background["state"] != "failed", background
+            time.sleep(0.25)
+        assert background["state"] == "completed", background
+        assert background["processed_ms"] == duration_ms
+        assert request("GET", route, token="denied")[0] == 403
+        assert request("POST", route + "/discard")[0] == 200
+        print(json.dumps({"background": background}))
     finally:
         server.shutdown()
         server.server_close()

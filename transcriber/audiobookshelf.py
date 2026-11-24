@@ -1,4 +1,4 @@
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 import hashlib
 from http.client import HTTPException
@@ -204,7 +204,7 @@ class Audiobookshelf:
             raise SourceError("invalid_manifest") from None
 
     @contextmanager
-    def materialize_track(self, identity, file_id, token, directory):
+    def materialize_track(self, identity, file_id, token, directory, *, target=None):
         if identity.source_id != self.config.source_id:
             raise SourceError("not_found")
         current = self.manifest(identity.item_id, token)
@@ -215,7 +215,9 @@ class Audiobookshelf:
             raise SourceError("not_found")
         if track.size > self.max_track_bytes:
             raise SourceError("size_limit")
-        with tempfile.TemporaryFile(dir=directory) as target:
+        with (tempfile.TemporaryFile(dir=directory) if target is None else nullcontext(target)) as target:
+            target.seek(0)
+            target.truncate(0)
             path = f"/api/items/{identity.item_id}/file/{track.file_id}"
             with self._get(path, token) as response:
                 length = response.headers.get("Content-Length")
@@ -223,6 +225,7 @@ class Audiobookshelf:
                     raise SourceError("stale_revision")
                 for chunk in self._chunks(response, track.size, time.monotonic() + self.transfer_seconds):
                     target.write(chunk)
+            target.flush()
             if target.tell() != track.size:
                 raise SourceError("incomplete_audio")
             if self.manifest(identity.item_id, token).identity != identity:

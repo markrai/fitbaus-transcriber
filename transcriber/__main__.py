@@ -5,8 +5,9 @@ import sys
 import signal
 import tempfile
 import http.client
+import re
 
-from .audiobookshelf import Audiobookshelf, SourceError, valid_bearer
+from .audiobookshelf import Audiobookshelf, SourceError, valid_bearer, identifier
 from .config import Config
 from .engine import EngineError, WhisperCpuEngine
 from .jobs import JobStore, QueueError
@@ -44,6 +45,17 @@ def main(argv=None):
         run = commands.add_parser(name)
         run.add_argument("--job-id", required=True)
         run.add_argument("--token-stdin", action="store_true")
+    for name in ("background-start", "background-list", "background-status", "background-resume",
+                 "background-pause", "background-cancel", "background-discard"):
+        command = commands.add_parser(name)
+        if name in ("background-start", "background-list"):
+            command.add_argument("--item-id", required=True)
+        else:
+            command.add_argument("--job-id", required=True)
+        if name == "background-start":
+            command.add_argument("--model", choices=tuple(MODELS), default="tiny")
+            command.add_argument("--start-ms", type=int, default=0)
+        command.add_argument("--token-stdin", action="store_true")
     args = parser.parse_args(argv)
     try:
         config = Config.from_env()
@@ -93,6 +105,44 @@ def main(argv=None):
             print(json.dumps({"models": results}, indent=2))
             if any(r["state"] in ("failed", "not_installed", "insufficient_memory") for r in results):
                 return 1
+        elif args.command and args.command.startswith("background-"):
+            if not args.token_stdin and not sys.stdin.isatty():
+                raise ValueError("Use --token-stdin for noninteractive credentials")
+            token = (sys.stdin.readline(8194).rstrip("\r\n") if args.token_stdin
+                     else getpass.getpass("Audiobookshelf access token or API key: "))
+            if not valid_bearer(token):
+                raise ValueError("Invalid Audiobookshelf credential")
+            headers = {"Authorization": "Bearer " + config.token, "X-Audiobookshelf-Token": token}
+            def request(method, route, body=None):
+                conn = http.client.HTTPConnection("127.0.0.1", config.port, timeout=60)
+                try:
+                    request_headers = dict(headers)
+                    if body is not None:
+                        request_headers["Content-Type"] = "application/json"
+                        body = json.dumps(body)
+                    conn.request(method, route, body=body, headers=request_headers)
+                    response = conn.getresponse()
+                    value = json.loads(response.read(262144))
+                    if response.status not in (200, 202):
+                        raise QueueError(value.get("error", "background_unavailable"))
+                    return value
+                finally:
+                    conn.close()
+            action = args.command.removeprefix("background-")
+            if action == "start":
+                item = identifier(args.item_id)
+                manifest = request("GET", "/v1/items/" + item + "/manifest")
+                body = {key: manifest[key] for key in ("source_id", "item_id", "audio_revision")}
+                body.update(model=args.model, start_ms=args.start_ms)
+                result = request("POST", "/v1/background", body)
+            elif action == "list":
+                result = request("GET", "/v1/items/" + identifier(args.item_id) + "/background")
+            else:
+                if not re.fullmatch(r"[0-9a-f]{64}", args.job_id):
+                    raise ValueError("Invalid job ID")
+                route = "/v1/background/" + args.job_id
+                result = request("GET", route) if action == "status" else request("POST", route + "/" + action)
+            print(json.dumps(result, indent=2))
         elif args.command == "prepare-model":
             prepare_model(config.data_dir)
             print("Whisper CPU model prepared", file=sys.stderr)
