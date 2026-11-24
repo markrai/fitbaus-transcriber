@@ -6,8 +6,24 @@ The transcriber and its consumers share the following data model. The foundation
 
 - `source_id`: stable operator-assigned Audiobookshelf source identifier; never an arbitrary URL supplied by a client.
 - `item_id`: library item identifier.
-- `audio_revision`: 64-character lowercase SHA-256 digest of a canonical, ordered audio manifest. The manifest algorithm will be defined with the Audiobookshelf adapter. Do not use title, duration, or item ID alone as a revision.
+- `audio_revision`: 64-character lowercase SHA-256 digest of a canonical, ordered audio manifest. The manifest algorithm is defined below. Do not use title, duration, or item ID alone as a revision.
 - The cache namespace includes all three fields. Authentication and authorization must be checked independently of cache hits.
+
+## Audiobookshelf manifest revision v1
+
+The adapter reads `GET /api/items/{item_id}?expanded=1` using the caller's bearer credential. It uses the ordered `media.tracks` array, not the order of raw audio files or a playback session. No listening history is modified.
+
+The revision is SHA-256 of compact ASCII JSON with no whitespace:
+
+```json
+["abs-manifest-v1",[["123",0,10125,123456,1700000000000125,1700000000000500]]]
+```
+
+Each row contains the file inode ID, book-relative offset in milliseconds, duration in milliseconds, size in bytes, modification time in microseconds, and change time in microseconds. Seconds and fractional millisecond file timestamps are rounded half-up to the respective integer unit. Only valid included tracks, contiguous within 1 ms of rounding error, are accepted. The first offset must be zero. Metadata-only title and cover changes do not affect the revision.
+
+This revision fingerprints upstream file metadata, not audio bytes. It detects ordinary file and ordering changes after Audiobookshelf rescans; it cannot guarantee detection of a byte change hidden from the upstream manifest. A content digest may supplement it in a later cache phase.
+
+The internal ingestion adapter checks authorization and revision before and after copying a track, verifies the expected byte count, and deletes temporary audio when its context closes. Maximum metadata response: 4 MiB; maximum track: 512 MiB; maximum tracks: 1,000. Transfer limits and timeouts bound individual ingestion; a later queue must bound aggregate disk and worker concurrency. No redirects or environment proxies are used.
 
 ## Ready window
 
