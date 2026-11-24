@@ -1,0 +1,62 @@
+name: Publish container image
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-container-image
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      IMAGE: ghcr.io/markrai/fitbaus-transcriber
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      TRANSCRIBER_TOKEN: ci-only-not-a-production-token-0123456789
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate release version
+        run: |
+          if ! [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[a-zA-Z0-9][a-zA-Z0-9.-]*)?$ ]]; then
+            echo 'Expected a version tag such as v0.1.0 or v0.1.0-rc.1.' >&2
+            exit 1
+          fi
+          echo "TRANSCRIBER_IMAGE=$IMAGE:$RELEASE_TAG" >> "$GITHUB_ENV"
+      - name: Test source
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -s tests -v
+      - name: Build release image
+        run: |
+          docker build --platform linux/amd64 \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.version=$RELEASE_TAG" \
+            --label "org.opencontainers.image.licenses=AGPL-3.0-only" \
+            --label "org.opencontainers.image.title=FitBaus Transcriber" \
+            --tag "$TRANSCRIBER_IMAGE" .
+      - name: Verify exact release image
+        run: |
+          bash scripts/verify-release-image.sh
+      - name: Authenticate to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Publish version tag
+        run: |
+          docker push "$TRANSCRIBER_IMAGE"
+          docker image inspect --format '{{join .RepoDigests "\n"}}' "$TRANSCRIBER_IMAGE"
+      - name: Sign out
+        if: always()
+        run: docker logout ghcr.io
