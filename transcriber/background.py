@@ -202,7 +202,7 @@ class Background:
             raise QueueError("profile_changed")
         return manifest
 
-    def check_model(self, name):
+    def check_model(self, name, require_memory=True):
         model_spec(name)
         directory = self.runner.directory
         if not model_present(model_directory(directory, name)):
@@ -212,14 +212,14 @@ class Background:
         if name != "tiny" and record.get("state") not in ("live_candidate", "background_candidate"):
             raise QueueError("model_not_qualified")
         gate = admission(name, resources, record.get("peak_rss_bytes"))
-        if not gate["allowed"]:
+        if require_memory and not gate["allowed"]:
             raise QueueError("resource_unavailable")
 
     def submit(self, identity, name, token, start=0):
         manifest = self.runner.source.manifest(identity.item_id, token)
         if manifest.identity != identity:
             raise SourceError("stale_revision")
-        self.check_model(name)
+        self.check_model(name, require_memory=False)
         with self.lock:
             if self.closed:
                 raise QueueError("worker_unavailable")
@@ -236,13 +236,15 @@ class Background:
                 state = ("processing" if self.current == job.id else "queued"
                          if job.id in self.pending and self.pending[job.id][1] > self.clock()
                          else "waiting_credentials")
+                if state == "queued" and self.clock() < self.defer_until:
+                    state = "waiting_resources"
             return job.status(state)
 
     def action(self, job_id, token, action):
         job = self.store.get(job_id)
         self.authorize(job, token, exact=action == "resume")
         if action == "resume" and job.state not in ("completed", "cancelled"):
-            self.check_model(job.model)
+            self.check_model(job.model, require_memory=False)
         with self.lock:
             if self.closed:
                 raise QueueError("worker_unavailable")
@@ -347,7 +349,10 @@ class Background:
                     if code in ("worker_busy", "resource_unavailable"):
                         self.defer_until = self.clock() + 5
                     elif code in ("unauthorized", "forbidden"):
-                        self.pending.pop(job.id, None)
+                        pending = self.pending.get(job.id)
+                        if pending is not None and pending[0] == token:
+                            self.pending.pop(job.id, None)
+                        self.drop_spool()
                     else:
                         self.store.transition(job.id, "failed", code)
                         self.pending.pop(job.id, None)
