@@ -11,7 +11,7 @@ from .audiobookshelf import Audiobookshelf, SourceError, valid_bearer
 
 from .contract import AudioIdentity, SCHEMA, MAX_WINDOW_MS
 from .dispatcher import Dispatcher
-from .background import Background, BackgroundStore
+from .background import Background, BackgroundStore, PreparedSpec
 from .jobs import JobStore, QueueError, MAX_ATTEMPTS
 from .runner import JobRunner
 from .engine import ENGINE_ID, WhisperCpuEngine
@@ -46,7 +46,9 @@ class Service(ThreadingHTTPServer):
                 if str(error) != "worker_busy":
                     super().server_close()
                     raise
-            self.background = Background(self.runner, BackgroundStore(config.data_dir / "background"))
+            prepared = BackgroundStore(config.data_dir / "background")
+            self.runner.prepared = prepared
+            self.background = Background(self.runner, prepared)
             self.dispatcher = Dispatcher(self.runner, config.queue.max_active, background=self.background)
 
     def readiness(self):
@@ -173,6 +175,8 @@ class Handler(BaseHTTPRequestHandler):
                 "model_quota_mib": self.server.config.model_quota_mib,
                 "job_api": True,
                 "background_job_api": True,
+                "prepared_transcripts": True,
+                "unattended_background_local": True,
                 "running_job_cancel": True,
                 "inference_timeout_seconds": self.server.config.engine.inference_timeout,
                 "pairing_api": True,
@@ -267,13 +271,24 @@ class Handler(BaseHTTPRequestHandler):
         if background is None:
             return self._json(503, {"error": "worker_unavailable"})
         try:
+            leases = self.headers.get_all("X-FitBaus-Background-Lease") or []
+            refreshes = self.headers.get_all("X-FitBaus-Background-Refresh") or []
+            unattended = leases == ["24h"]
+            if leases or refreshes:
+                if self.client_address[0] not in ("127.0.0.1", "::1") or not self._operator_authorized():
+                    return self._json(401, {"error": "unauthorized"})
+                if action not in ("submit", "resume") or not unattended or len(refreshes) > 1 or (
+                        refreshes and not valid_bearer(refreshes[0])):
+                    raise ValueError("invalid_request")
+            refresh = refreshes[0] if refreshes else None
             if action == "submit":
                 body = self._body()
                 required = {"source_id", "item_id", "audio_revision", "model"}
                 if not isinstance(body, dict) or not required <= body.keys() or body.keys() - required - {"start_ms"}:
                     raise ValueError("invalid_request")
                 identity = AudioIdentity(body["source_id"], body["item_id"], body["audio_revision"])
-                result = background.submit(identity, body["model"], token, body.get("start_ms", 0))
+                result = background.submit(identity, body["model"], token, body.get("start_ms", 0),
+                                           unattended=unattended, refresh=refresh)
             elif action == "list":
                 manifest = background.runner.source.manifest(identifier, token)
                 result = {"jobs": [background.status(job) for job in background.store.for_item(
@@ -283,7 +298,7 @@ class Handler(BaseHTTPRequestHandler):
                 background.authorize(job, token, exact=False)
                 result = background.status(job)
             else:
-                result = background.action(identifier, token, action)
+                result = background.action(identifier, token, action, unattended=unattended, refresh=refresh)
             self.server.dispatcher.wake()
             return self._json(202 if action in ("submit", "resume") and
                               result.get("state") in ("queued", "processing", "waiting_resources") else 200, result)
@@ -332,6 +347,7 @@ class Handler(BaseHTTPRequestHandler):
             "item_id": spec.identity.item_id, "audio_revision": spec.identity.audio_revision,
             "start_ms": spec.start_ms, "end_ms": spec.end_ms, "profile": spec.profile,
             "state": job.state, "dispatch": self.server.dispatcher.dispatch_state(job),
+            "prepared": isinstance(spec, PreparedSpec),
             "attempts": job.attempts, "max_attempts": MAX_ATTEMPTS, "error": job.error,
         }
 

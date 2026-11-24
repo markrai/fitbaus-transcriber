@@ -113,8 +113,15 @@ def main():
         assert background["state"] == "completed", background
         assert background["processed_ms"] == duration_ms
         assert request("GET", route, token="denied")[0] == 403
+        code, prepared = request("POST", "/v1/jobs", body)
+        assert code == 200 and prepared["prepared"] and prepared["state"] == "ready", prepared
+        prepared_route = "/v1/jobs/" + prepared["job_id"]
+        code, transcript = request("GET", prepared_route + "/transcript")
+        assert code == 200 and transcript["coverage"] == result["coverage"] and transcript["cues"], transcript
+        assert request("GET", prepared_route + "/transcript", token="denied")[0] == 403
         assert request("POST", route + "/discard")[0] == 200
-        print(json.dumps({"background": background}))
+        assert request("GET", prepared_route)[0] == 404
+        print(json.dumps({"background": background, "prepared": prepared}))
     finally:
         server.shutdown()
         server.server_close()

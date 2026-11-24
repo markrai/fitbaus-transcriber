@@ -44,7 +44,7 @@ Pin an image digest (`ghcr.io/markrai/fitbaus-transcriber@sha256:...`) for conte
 | Base | Optional, not bundled | Candidate for live use after hardware qualification |
 | Small | Optional, not bundled | Background recommended |
 
-Only Tiny is executable in this phase. The authenticated capabilities response advertises the pinned model inventory and download progress. Optional model downloads are managed by the local server operator; live model activation, remote administration and prepared-transcript playback are later phases. Qualified models can be selected for background jobs. Hardware qualification is available through the local CLI. Medium and Large-v3 are not supported. Tiny retains its previous engine ID and language profile so existing cached transcripts remain compatible. Model weights are from [Systran's Faster-Whisper Tiny](https://huggingface.co/Systran/faster-whisper-tiny/tree/d90ca5fe260221311c53c58e660288d3deb8d356), a conversion of OpenAI Whisper under the MIT license. The corresponding [license notice](licenses/whisper-MIT.txt) is included in the image.
+Only Tiny is used for uncached live inference. The authenticated capabilities response advertises the pinned model inventory and download progress. Optional model downloads are managed by the local server operator; live model activation and remote administration are later phases. Qualified models can be selected for background jobs. Hardware qualification is available through the local CLI. Medium and Large-v3 are not supported. Tiny retains its previous engine ID and language profile so existing cached transcripts remain compatible. Model weights are from [Systran's Faster-Whisper Tiny](https://huggingface.co/Systran/faster-whisper-tiny/tree/d90ca5fe260221311c53c58e660288d3deb8d356), a conversion of OpenAI Whisper under the MIT license. The corresponding [license notice](licenses/whisper-MIT.txt) is included in the image.
 
 ### Manage optional models
 
@@ -75,12 +75,12 @@ See [hardware qualification](docs/QUALIFICATION.md) for the timing and memory ad
 ### Prepare an audiobook in the background
 
 ```sh
-docker compose exec transcriber python -m transcriber background-start --item-id BOOK_ID --model small
+docker compose exec transcriber python -m transcriber background-start --item-id BOOK_ID --model small --unattended
 docker compose exec transcriber python -m transcriber background-status --job-id JOB_ID
-docker compose exec transcriber python -m transcriber background-resume --job-id JOB_ID
+docker compose exec transcriber python -m transcriber background-resume --job-id JOB_ID --unattended
 ```
 
-Choose username/password (default) or an existing access token/API key at the interactive prompt. Passwords are exchanged directly with the configured Audiobookshelf server and are never saved. HTTPS is recommended; HTTP login requires explicit confirmation. Each job can process a whole book or start at an aligned five-minute offset using `--start-ms`. Live Read Along takes priority and can preempt background work. Completed windows and progress are stored together in a separate bounded staging database; these results are not yet used by Read Along. A restart or expired in-memory credential requires an explicit resume. Use `background-list --item-id BOOK_ID`, `background-pause`, `background-cancel` or `background-discard` as needed. See [background job API](docs/BACKGROUND-JOBS.md).
+Choose username/password (default) or an existing access token/API key at the interactive prompt. Passwords are exchanged directly with the configured Audiobookshelf server and are never saved. HTTPS is recommended; HTTP login requires explicit confirmation. Each job can process a whole book or start at an aligned five-minute offset using `--start-ms`. Live Read Along takes priority and can preempt background work. Completed windows and progress are stored together in a separate bounded database and served directly to Read Along on matching requests, preferring Small, then Base, then Tiny. The optional `--unattended` flag grants up to 24 hours of memory-only authorization and permits renewal with supported Audiobookshelf login sessions. A restart, expired lease or rejected refresh requires an explicit resume. Use `background-list --item-id BOOK_ID`, `background-pause`, `background-cancel` or `background-discard` as needed. See [background job API](docs/BACKGROUND-JOBS.md).
 
 ## Publishing releases
 
@@ -188,7 +188,7 @@ An exclusive Linux file lock prevents concurrent inference against the same data
 
 Completed and failed jobs are evicted by recency when admission or result storage reaches its limits. Queued and running jobs are never evicted. Each result is capped at 1 MiB. The cache limit counts serialized transcript payloads; SQLite metadata, transaction journal, model files and temporary audio are additional disk usage. SQLite retains allocated pages for reuse after eviction. Use the same queue limits for all invocations sharing the data directory. Do not run this experimental queue on a network filesystem without reliable Linux file locking.
 
-The HTTP dispatcher runs one job at a time, in submission order. Pending credentials are memory-only and expire for dispatch after ten minutes. No automatic credential renewal or cancellation of running inference is provided. Use `discard-job --job-id YOUR_JOB_ID` locally (when no worker owns the data directory) to remove abandoned queued or failed jobs for deleted or inaccessible items.
+The HTTP dispatcher runs one inference job at a time, prioritizing live requests over background work. Live pending credentials expire after ten minutes; explicit local unattended background sessions support renewal and a bounded 24-hour lease. Running inference supports supervised cancellation. Use `discard-job --job-id YOUR_JOB_ID` locally (when no worker owns the data directory) to remove abandoned queued or failed jobs for deleted or inaccessible items.
 
 ## API
 

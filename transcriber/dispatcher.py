@@ -37,6 +37,8 @@ class Dispatcher:
             self._expire()
             if self.closed:
                 raise QueueError("worker_unavailable")
+            if job.state == "ready":
+                return job, False
             job = self.runner.store.get(job_id)
             if job.state == "ready":
                 return job, False

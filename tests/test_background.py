@@ -1,4 +1,5 @@
 import hashlib
+import sqlite3
 from pathlib import Path
 import tempfile
 import threading
@@ -158,6 +159,64 @@ class BackgroundTests(unittest.TestCase):
             time.sleep(0.01)
         self.assertEqual(self.store.get(job_id).cursor_ms, 600001)
         self.assertEqual(self.live.get(job.spec.id).state, "ready")
+
+    def test_existing_checkpoint_migrates_without_regeneration(self):
+        job_id = self.background.submit(IDENTITY, "small", TOKEN)["job_id"]
+        self.step()
+        with sqlite3.connect(self.store.path) as db:
+            db.execute("DROP INDEX prepared_window_id")
+            db.execute("ALTER TABLE windows DROP COLUMN prepared_id")
+        reopened = BackgroundStore(self.root / "background")
+        spec = JobSpec(IDENTITY, 0, 300000, engine_profile(self.config))
+        prepared = reopened.find_prepared(spec, self.config)
+        self.assertEqual(prepared.state, "ready")
+        self.assertEqual(prepared.spec.profile, profile("small", self.config))
+        self.assertEqual(reopened.get_prepared(prepared.spec.id), prepared)
+        self.assertEqual(reopened.get(job_id).cursor_ms, 300000)
+        self.assertIsNone(reopened.find_prepared(spec, EngineConfig(language="fr")))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_unattended_renews_access_once_and_keeps_checkpoint(self):
+        original_manifest = self.source.manifest
+        job_id = self.background.submit(IDENTITY, "small", TOKEN, unattended=True,
+                                        refresh="refresh-one")["job_id"]
+        self.step()
+        self.now = 601
+        self.background.expire()
+        self.assertIn(job_id, self.background.pending)
+        def manifest(item, token):
+            if token == TOKEN:
+                raise SourceError("unauthorized")
+            if token != "new-access":
+                raise SourceError("forbidden")
+            return original_manifest(item, TOKEN)
+        self.source.manifest = manifest
+        self.source.refresh_session = lambda refresh: ("new-access", "refresh-two")
+        self.step()
+        self.assertEqual(self.store.get(job_id).cursor_ms, 300000)
+        self.assertEqual(self.background.pending[job_id][:3], ("new-access", 86400, "refresh-two"))
+        self.step()
+        self.assertEqual(self.store.get(job_id).cursor_ms, 600000)
+        for secret in (TOKEN, "new-access", "refresh-one", "refresh-two"):
+            self.assertNotIn(secret.encode(), self.store.path.read_bytes())
+        self.now = 86400
+        self.background.expire()
+        self.assertEqual(self.background.status(self.store.get(job_id))["state"], "waiting_credentials")
+
+    def test_refresh_rejection_requires_fresh_login(self):
+        job_id = self.background.submit(IDENTITY, "small", TOKEN, unattended=True,
+                                        refresh="refresh-one")["job_id"]
+        self.step()
+        def expired(*args):
+            raise SourceError("unauthorized")
+        def rejected(*args):
+            raise SourceError("login_rejected")
+        self.source.manifest = expired
+        self.source.refresh_session = rejected
+        self.step()
+        self.assertEqual(self.store.get(job_id).cursor_ms, 300000)
+        self.assertEqual(self.background.status(self.store.get(job_id))["state"], "waiting_credentials")
+        self.assertNotIn(job_id, self.background.pending)
 
     def test_track_spool_is_anonymous_reused_and_credential_scoped(self):
         job_id = self.background.submit(IDENTITY, "tiny", TOKEN)["job_id"]

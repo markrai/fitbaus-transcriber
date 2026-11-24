@@ -193,14 +193,34 @@ class Audiobookshelf:
             yield chunk
 
     def login(self, username, password):
+        return self.login_session(username, password, renewable=False)[0]
+
+    def login_session(self, username, password, renewable=True):
         if not isinstance(username, str) or not username.strip() or len(username) > 256:
             raise ValueError("Invalid Audiobookshelf username")
         if not isinstance(password, str) or len(password) > 4096:
             raise ValueError("Invalid Audiobookshelf password")
+        headers = {"Content-Type": "application/json", "Accept": "application/json",
+                   "Accept-Encoding": "identity"}
+        if renewable:
+            headers["x-return-tokens"] = "true"
         request = Request(self.config.base_url + "/login",
                           data=json.dumps({"username": username, "password": password}).encode("utf-8"),
-                          headers={"Content-Type": "application/json", "Accept": "application/json",
-                                   "Accept-Encoding": "identity"}, method="POST")
+                          headers=headers, method="POST")
+        return self._session_response(request, renewable)
+
+    def refresh_session(self, refresh):
+        if not valid_bearer(refresh):
+            raise SourceError("login_rejected")
+        request = Request(self.config.base_url + "/auth/refresh", data=b"", method="POST",
+                          headers={"x-refresh-token": refresh, "Accept": "application/json",
+                                   "Accept-Encoding": "identity"})
+        access, replacement = self._session_response(request, True)
+        if replacement is None:
+            raise SourceError("invalid_login_response")
+        return access, replacement
+
+    def _session_response(self, request, renewable):
         try:
             with self.opener.open(request, timeout=self.timeout) as response:
                 if response.status != 200 or response.headers.get_content_type() != "application/json" or (
@@ -211,7 +231,10 @@ class Audiobookshelf:
             token = user.get("accessToken", user.get("token"))
             if not valid_bearer(token):
                 raise SourceError("invalid_login_response")
-            return token
+            refresh = user.get("refreshToken") if renewable else None
+            if refresh is not None and not valid_bearer(refresh):
+                raise SourceError("invalid_login_response")
+            return token, refresh
         except HTTPError as error:
             status = error.code
             error.close()

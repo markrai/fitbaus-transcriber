@@ -49,6 +49,10 @@ class UpstreamHandler(BaseHTTPRequestHandler):
             self.send_header("Location", self.server.redirect)
             self.end_headers()
             return
+        if self.path == "/audiobookshelf/auth/refresh":
+            if self.headers.get("x-refresh-token") != "refresh-one":
+                return self.reply(401, b"rejected")
+            return self.reply(200, json.dumps({"user": {"accessToken": USER, "refreshToken": "refresh-two"}}).encode())
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if self.path != "/audiobookshelf/login" or body != {"username": "reader", "password": "test-password"}:
             return self.reply(401, b"rejected")
@@ -176,6 +180,14 @@ class IntegrationTests(unittest.TestCase):
         with self.assertRaisesRegex(SourceError, "login_rejected"):
             self.adapter.login("reader", "wrong")
         self.assertEqual(self.upstream.login_requests, ["/audiobookshelf/login"] * 4)
+
+    def test_renewable_login_and_refresh_rotation(self):
+        self.upstream.login_response = {"user": {"accessToken": USER, "refreshToken": "refresh-one"}}
+        self.assertEqual(self.adapter.login_session("reader", "test-password"), (USER, "refresh-one"))
+        self.assertEqual(self.adapter.refresh_session("refresh-one"), (USER, "refresh-two"))
+        with self.assertRaisesRegex(SourceError, "login_rejected"):
+            self.adapter.refresh_session("invalid")
+        self.assertEqual(self.upstream.login_requests, ["/audiobookshelf/login", "/audiobookshelf/auth/refresh", "/audiobookshelf/auth/refresh"])
 
     def test_login_redirect_never_forwards_credentials(self):
         self.upstream.redirect = self.source.base_url + "/other"

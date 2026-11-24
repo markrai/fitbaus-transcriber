@@ -11,10 +11,10 @@ import threading
 import time
 
 from .audiobookshelf import SourceError, MAX_TRACK_BYTES
-from .contract import AudioIdentity, MAX_WINDOW_MS, TranscriptWindow
+from .contract import AudioIdentity, Cue, MAX_WINDOW_MS, SCHEMA, TranscriptWindow
 from .engine import EngineError, WhisperCpuEngine
 from .inference_process import supervised_window
-from .jobs import MAX_RESULT_BYTES, QueueError
+from .jobs import Job, JobSpec, MAX_RESULT_BYTES, QueueError
 from .model import model_directory, model_present, model_spec
 from .qualification import load_record
 from .resources import admission, snapshot
@@ -23,6 +23,8 @@ MAX_PARENTS = 32
 MAX_BOOK_MS = 100 * 60 * 60 * 1000
 MAX_STAGE_BYTES = 128 * 1024 * 1024
 CREDENTIAL_TTL = 600
+UNATTENDED_TTL = 24 * 60 * 60
+REFRESH_COOLDOWN = 60
 
 
 def profile(name, config):
@@ -55,6 +57,20 @@ class BookJob:
                 "state": state or self.state, "error": self.error}
 
 
+@dataclass(frozen=True)
+class PreparedSpec(JobSpec):
+    parent_id: str
+
+    @property
+    def id(self):
+        return prepared_id(self.parent_id, self.start_ms, self.end_ms)
+
+
+def prepared_id(parent_id, start, end):
+    return hashlib.sha256(json.dumps(["fitbaus-prepared-v1", parent_id, start, end],
+                                    separators=(",", ":")).encode("ascii")).hexdigest()
+
+
 class BackgroundStore:
     def __init__(self, directory, max_parents=MAX_PARENTS, max_bytes=MAX_STAGE_BYTES):
         self.directory = Path(directory)
@@ -74,6 +90,13 @@ class BackgroundStore:
                 start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL,
                 result TEXT NOT NULL, result_bytes INTEGER NOT NULL,
                 PRIMARY KEY(parent_id,start_ms))""")
+            if "prepared_id" not in {row["name"] for row in db.execute("PRAGMA table_info(windows)")}:
+                db.execute("ALTER TABLE windows ADD COLUMN prepared_id TEXT")
+            for row in db.execute("SELECT parent_id,start_ms,end_ms FROM windows WHERE prepared_id IS NULL").fetchall():
+                db.execute("UPDATE windows SET prepared_id=? WHERE parent_id=? AND start_ms=?",
+                           (prepared_id(row["parent_id"], row["start_ms"], row["end_ms"]), row["parent_id"], row["start_ms"]))
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS prepared_window_id ON windows(prepared_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS prepared_book_identity ON books(source_id,item_id,revision)")
 
     @contextmanager
     def transaction(self):
@@ -159,12 +182,57 @@ class BackgroundStore:
             total = db.execute("SELECT coalesce(sum(result_bytes),0) FROM windows").fetchone()[0]
             if total + size > self.max_bytes:
                 raise QueueError("background_storage_full")
-            db.execute("INSERT INTO windows VALUES(?,?,?,?,?)",
-                       (job.id, window.start_ms, window.end_ms, result, size))
+            db.execute("INSERT INTO windows(parent_id,start_ms,end_ms,result,result_bytes,prepared_id) VALUES(?,?,?,?,?,?)",
+                       (job.id, window.start_ms, window.end_ms, result, size,
+                        prepared_id(job.id, window.start_ms, window.end_ms)))
             state = "completed" if window.end_ms == job.duration_ms else "pending"
             db.execute("UPDATE books SET cursor_ms=?,state=?,error=NULL,touched=? WHERE id=?",
                        (window.end_ms, state, time.time_ns(), job.id))
             return self.row(db.execute("SELECT * FROM books WHERE id=?", (job.id,)).fetchone())
+
+    @staticmethod
+    def prepared(row):
+        if row is None:
+            return None
+        try:
+            spec = PreparedSpec(AudioIdentity(row["source_id"], row["item_id"], row["revision"]),
+                                row["window_start"], row["window_end"], row["profile"], row["id"])
+            raw = row["result"]
+            if len(raw.encode("ascii")) > MAX_RESULT_BYTES or spec.id != row["prepared_id"]:
+                raise ValueError
+            value = json.loads(raw)
+            identity = AudioIdentity(value["source_id"], value["item_id"], value["audio_revision"])
+            coverage = value["coverage"]
+            window = TranscriptWindow(identity, coverage["start_ms"], coverage["end_ms"],
+                                      tuple(Cue(c["start_ms"], c["end_ms"], c["text"]) for c in value["cues"]))
+            if value["schema"] != SCHEMA or (identity, window.start_ms, window.end_ms) != (
+                    spec.identity, spec.start_ms, spec.end_ms):
+                raise ValueError
+            return Job(spec, "ready", 0, None, raw)
+        except (ValueError, TypeError, KeyError, RecursionError):
+            raise QueueError("background_storage_error") from None
+
+    def find_prepared(self, spec, config):
+        profiles = tuple(profile(name, config) for name in ("small", "base", "tiny"))
+        with self.transaction() as db:
+            row = db.execute("""
+                SELECT b.*,w.start_ms AS window_start,w.end_ms AS window_end,w.result,w.prepared_id
+                FROM books b JOIN windows w ON w.parent_id=b.id
+                WHERE b.source_id=? AND b.item_id=? AND b.revision=? AND w.start_ms=? AND w.end_ms=?
+                    AND b.profile IN (?,?,?) AND w.end_ms<=b.cursor_ms
+                ORDER BY CASE b.profile WHEN ? THEN 0 WHEN ? THEN 1 ELSE 2 END,b.id LIMIT 1
+            """, (spec.identity.source_id, spec.identity.item_id, spec.identity.audio_revision,
+                  spec.start_ms, spec.end_ms, *profiles, profiles[0], profiles[1])).fetchone()
+            return self.prepared(row)
+
+    def get_prepared(self, job_id):
+        with self.transaction() as db:
+            row = db.execute("""
+                SELECT b.*,w.start_ms AS window_start,w.end_ms AS window_end,w.result,w.prepared_id
+                FROM windows w JOIN books b ON b.id=w.parent_id
+                WHERE w.prepared_id=? AND w.end_ms<=b.cursor_ms
+            """, (job_id,)).fetchone()
+            return self.prepared(row)
 
     def discard(self, job_id):
         with self.transaction() as db:
@@ -215,7 +283,10 @@ class Background:
         if require_memory and not gate["allowed"]:
             raise QueueError("resource_unavailable")
 
-    def submit(self, identity, name, token, start=0):
+    def credential(self, token, unattended, refresh):
+        return (token, self.clock() + (UNATTENDED_TTL if unattended else CREDENTIAL_TTL), refresh, None)
+
+    def submit(self, identity, name, token, start=0, *, unattended=False, refresh=None):
         manifest = self.runner.source.manifest(identity.item_id, token)
         if manifest.identity != identity:
             raise SourceError("stale_revision")
@@ -225,7 +296,7 @@ class Background:
                 raise QueueError("worker_unavailable")
             job = self.store.submit(identity, name, profile(name, self.config), manifest.duration_ms, start)
             if job.state == "pending":
-                self.pending[job.id] = (token, self.clock() + CREDENTIAL_TTL)
+                self.pending[job.id] = self.credential(token, unattended, refresh)
             return self.status(job)
 
     def status(self, job):
@@ -238,9 +309,13 @@ class Background:
                          else "waiting_credentials")
                 if state == "queued" and self.clock() < self.defer_until:
                     state = "waiting_resources"
-            return job.status(state)
+            result = job.status(state)
+            entry = self.pending.get(job.id)
+            result["authorization_remaining_seconds"] = max(0, int(entry[1] - self.clock())) if entry else 0
+            result["authorization_renewable"] = bool(entry and entry[2] and entry[1] > self.clock())
+            return result
 
-    def action(self, job_id, token, action):
+    def action(self, job_id, token, action, *, unattended=False, refresh=None):
         job = self.store.get(job_id)
         self.authorize(job, token, exact=action == "resume")
         if action == "resume" and job.state not in ("completed", "cancelled"):
@@ -252,7 +327,7 @@ class Background:
             if action == "resume":
                 if job.state not in ("completed", "cancelled"):
                     job = self.store.transition(job_id, "pending")
-                    self.pending[job_id] = (token, self.clock() + CREDENTIAL_TTL)
+                    self.pending[job_id] = self.credential(token, unattended, refresh)
             else:
                 if action == "discard":
                     if self.current == job_id:
@@ -270,7 +345,7 @@ class Background:
 
     def expire(self):
         with self.lock:
-            for job_id, (_, deadline) in list(self.pending.items()):
+            for job_id, (_, deadline, _, _) in list(self.pending.items()):
                 if deadline <= self.clock():
                     self.pending.pop(job_id, None)
             if self.current is None and self.spool_key and self.spool_key[0] not in self.pending:
@@ -280,7 +355,7 @@ class Background:
         with self.lock:
             if self.closed or self.clock() < self.defer_until:
                 return None
-            for job_id, (token, deadline) in list(self.pending.items()):
+            for job_id, (token, deadline, _, _) in list(self.pending.items()):
                 if deadline <= self.clock():
                     self.pending.pop(job_id, None)
                     continue
@@ -321,6 +396,34 @@ class Background:
             if self.control is not None:
                 self.control.cancel()
 
+    def renew(self, job, token, control):
+        with self.lock:
+            entry = self.pending.get(job.id)
+            if entry is None or entry[0] != token or control.cancelled():
+                return
+            _, deadline, refresh, last = entry
+            now = self.clock()
+            if deadline <= now or refresh is None or (last is not None and now - last < REFRESH_COOLDOWN):
+                self.pending.pop(job.id, None)
+                self.drop_spool()
+                return
+        try:
+            access, replacement = self.runner.source.refresh_session(refresh)
+            self.authorize(job, access)
+        except (SourceError, QueueError, OSError):
+            with self.lock:
+                if self.pending.get(job.id) is entry:
+                    self.pending.pop(job.id, None)
+                    self.drop_spool()
+            return
+        with self.lock:
+            if self.pending.get(job.id) is entry:
+                if self.clock() >= deadline:
+                    self.pending.pop(job.id, None)
+                else:
+                    self.pending[job.id] = (access, deadline, replacement, self.clock())
+                self.drop_spool()
+
     def step(self, job, token, control):
         try:
             with self.runner.store.worker() as fd:
@@ -343,12 +446,15 @@ class Background:
                         if current.state == "completed":
                             self.pending.pop(job.id, None)
         except (SourceError, EngineError, QueueError, OSError) as error:
+            if isinstance(error, SourceError) and error.code == "unauthorized":
+                self.renew(job, token, control)
+                return
             with self.lock:
                 if not control.cancelled():
                     code = str(error) if isinstance(error, (SourceError, EngineError, QueueError)) else "background_unavailable"
                     if code in ("worker_busy", "resource_unavailable"):
                         self.defer_until = self.clock() + 5
-                    elif code in ("unauthorized", "forbidden"):
+                    elif code == "forbidden":
                         pending = self.pending.get(job.id)
                         if pending is not None and pending[0] == token:
                             self.pending.pop(job.id, None)

@@ -2,6 +2,8 @@ import json
 import threading
 
 from .audiobookshelf import SourceError
+from .background import PreparedSpec, profile
+from .model import MODELS
 from .engine import ENGINE_ID, EngineError
 from .inference_process import supervised_window
 from .jobs import JobSpec, QueueError
@@ -31,12 +33,13 @@ class RunControl:
 
 
 class JobRunner:
-    def __init__(self, store, source, engine, directory, transcribe=None):
+    def __init__(self, store, source, engine, directory, transcribe=None, prepared=None):
         self.store = store
         self.source = source
         self.engine = engine
         self.directory = directory
         self.transcribe = transcribe
+        self.prepared = prepared
 
     def submit(self, item_id, token, start_ms, end_ms, expected_revision=None, expected_source=None):
         manifest = self.source.manifest(item_id, token)
@@ -47,17 +50,28 @@ class JobRunner:
         spec = JobSpec(manifest.identity, start_ms, end_ms, engine_profile(self.engine.config))
         if end_ms > manifest.duration_ms:
             raise ValueError("Transcript window exceeds audiobook")
+        if self.prepared is not None:
+            prepared = self.prepared.find_prepared(spec, self.engine.config)
+            if prepared is not None:
+                return prepared
         return self.store.submit(spec)
 
     def _authorize(self, job, token):
         manifest = self.source.manifest(job.spec.identity.item_id, token)
         if manifest.identity != job.spec.identity:
             raise SourceError("stale_revision")
-        if job.spec.profile != engine_profile(self.engine.config):
+        allowed = ({profile(name, self.engine.config) for name in MODELS}
+                   if isinstance(job.spec, PreparedSpec) else {engine_profile(self.engine.config)})
+        if job.spec.profile not in allowed:
             raise QueueError("profile_changed")
 
     def run(self, job_id, token, control=None):
         control = control or RunControl()
+        if self.prepared is not None:
+            prepared = self.prepared.get_prepared(job_id)
+            if prepared is not None:
+                self._authorize(prepared, token)
+                return prepared
         claimed = False
         try:
             with self.store.worker() as lock_fd:
@@ -120,11 +134,17 @@ class JobRunner:
                 control.finished = True
 
     def status(self, job_id, token):
-        job = self.store.get(job_id)
+        job = self.prepared.get_prepared(job_id) if self.prepared is not None else None
+        if job is None:
+            job = self.store.get(job_id)
         self._authorize(job, token)
         return job
 
     def cancellable(self, job_id, token):
+        prepared = self.prepared.get_prepared(job_id) if self.prepared is not None else None
+        if prepared is not None:
+            self._authorize(prepared, token)
+            raise QueueError("job_not_cancellable")
         job = self.store.get(job_id)
         manifest = self.source.manifest(job.spec.identity.item_id, token)
         if (manifest.identity.source_id, manifest.identity.item_id) != (
@@ -137,5 +157,6 @@ class JobRunner:
         job = self.status(job_id, token)
         if job.state != "ready":
             raise QueueError("job_not_ready")
-        self.store.touch(job_id)
+        if not isinstance(job.spec, PreparedSpec):
+            self.store.touch(job_id)
         return json.loads(job.result)

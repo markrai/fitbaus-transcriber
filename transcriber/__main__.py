@@ -13,12 +13,14 @@ from .config import Config
 from .engine import EngineError, WhisperCpuEngine
 from .jobs import JobStore, QueueError
 from .runner import JobRunner
+from .background import BackgroundStore
 from .model import MODELS, prepare_model
 from .qualification import MAX_WAV_BYTES, inventory, qualify
 from .server import Service
 
 
-def source_credential(config, token_stdin):
+def source_credential(config, token_stdin, renewable=False):
+    refresh = None
     if config.source is None:
         raise ValueError("Audiobookshelf source not configured")
     if token_stdin:
@@ -40,7 +42,11 @@ def source_credential(config, token_stdin):
                 username = input("Audiobookshelf username: ").strip()
                 password = getpass.getpass("Audiobookshelf password: ")
                 try:
-                    token = Audiobookshelf(config.source).login(username, password)
+                    source = Audiobookshelf(config.source)
+                    if renewable:
+                        token, refresh = source.login_session(username, password)
+                    else:
+                        token = source.login(username, password)
                 finally:
                     del password
             elif choice == "2":
@@ -49,7 +55,7 @@ def source_credential(config, token_stdin):
                 raise ValueError("Invalid authentication choice")
     if not valid_bearer(token):
         raise ValueError("Invalid Audiobookshelf credential")
-    return token
+    return (token, refresh) if renewable else token
 
 
 def main(argv=None):
@@ -91,6 +97,9 @@ def main(argv=None):
             command.add_argument("--model", choices=tuple(MODELS), default="tiny")
             command.add_argument("--start-ms", type=int, default=0)
         command.add_argument("--token-stdin", action="store_true")
+        if name in ("background-start", "background-resume"):
+            command.add_argument("--unattended", action="store_true",
+                                 help="Authorize this job for up to 24 hours in RAM, until stopped or restarted")
     args = parser.parse_args(argv)
     try:
         config = Config.from_env()
@@ -141,12 +150,22 @@ def main(argv=None):
             if any(r["state"] in ("failed", "not_installed", "insufficient_memory") for r in results):
                 return 1
         elif args.command and args.command.startswith("background-"):
-            token = source_credential(config, args.token_stdin)
+            unattended = getattr(args, "unattended", False)
+            refresh = None
+            if unattended:
+                print("Authorizing this job for up to 24 hours, in memory only. Restart requires login.", file=sys.stderr)
+                token, refresh = source_credential(config, args.token_stdin, renewable=True)
+            else:
+                token = source_credential(config, args.token_stdin)
             headers = {"Authorization": "Bearer " + config.token, "X-Audiobookshelf-Token": token}
             def request(method, route, body=None):
                 conn = http.client.HTTPConnection("127.0.0.1", config.port, timeout=60)
                 try:
                     request_headers = dict(headers)
+                    if unattended and method == "POST":
+                        request_headers["X-FitBaus-Background-Lease"] = "24h"
+                        if refresh is not None:
+                            request_headers["X-FitBaus-Background-Refresh"] = refresh
                     if body is not None:
                         request_headers["Content-Type"] = "application/json"
                         body = json.dumps(body)
@@ -188,11 +207,13 @@ def main(argv=None):
             source = Audiobookshelf(config.source)
             engine = WhisperCpuEngine(config.data_dir, config.engine)
             store = JobStore(config.data_dir / "queue", config.queue)
-            runner = JobRunner(store, source, engine, config.data_dir)
+            runner = JobRunner(store, source, engine, config.data_dir,
+                               prepared=BackgroundStore(config.data_dir / "background"))
             if args.command in ("submit", "transcribe"):
                 job = runner.submit(args.item_id, token, args.start_ms, args.end_ms)
                 if args.command == "submit":
-                    output = {"job_id": job.spec.id, "state": job.state}
+                    output = {"job_id": job.spec.id, "state": job.state, "profile": job.spec.profile,
+                              "prepared": hasattr(job.spec, "parent_id")}
                 else:
                     runner.run(job.spec.id, token)
                     output = runner.result(job.spec.id, token)
