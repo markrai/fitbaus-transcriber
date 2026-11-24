@@ -14,7 +14,7 @@ from .engine import EngineError, WhisperCpuEngine
 from .jobs import JobStore, QueueError
 from .runner import JobRunner
 from .background import BackgroundStore
-from .model import MODELS, prepare_model
+from .model import MODELS, prepare_model, model_directory, model_present
 from .qualification import MAX_WAV_BYTES, inventory, qualify
 from .server import Service
 
@@ -62,6 +62,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="fitbaus-transcriber")
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("serve")
+    commands.add_parser("check-config")
+    commands.add_parser("doctor")
+    source_check = commands.add_parser("check-source")
+    source_check.add_argument("--token-stdin", action="store_true")
     commands.add_parser("prepare-model")
     commands.add_parser("models")
     commands.add_parser("qualification")
@@ -106,7 +110,34 @@ def main(argv=None):
         config.data_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryFile(dir=config.data_dir):
             pass
-        if args.command in ("pair", "revoke-pairings"):
+        if args.command == "check-config":
+            if config.source is None:
+                raise ValueError("Audiobookshelf source not configured")
+            if not model_present(model_directory(config.data_dir)):
+                raise ValueError("Bundled Tiny model is unavailable")
+            print("Configuration, data directory and bundled model checks passed.")
+        elif args.command == "doctor":
+            client = http.client.HTTPConnection("127.0.0.1", config.port, timeout=5)
+            try:
+                client.request("GET", "/readyz")
+                response = client.getresponse()
+                ready = response.status == 200
+                readiness = json.loads(response.read(4096))
+            finally:
+                client.close()
+            print(json.dumps({"ready": ready, "readiness": readiness,
+                              "source_configured": config.source is not None,
+                              "models": inventory(config.data_dir, config.engine)["models"]}, indent=2))
+            if not ready:
+                return 1
+        elif args.command == "check-source":
+            token = source_credential(config, args.token_stdin)
+            count = Audiobookshelf(config.source).check_access(token)
+            print(json.dumps({"source_access": "ok", "book_libraries": count}))
+            if count == 0:
+                print("No accessible book libraries. Check Audiobookshelf permissions.", file=sys.stderr)
+                return 1
+        elif args.command in ("pair", "revoke-pairings"):
             path = "/v1/pairing/issue" if args.command == "pair" else "/v1/pairing/revoke-all"
             client = http.client.HTTPConnection("127.0.0.1", config.port, timeout=5)
             try:
