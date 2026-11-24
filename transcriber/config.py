@@ -2,6 +2,8 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 
+from .audiobookshelf import SourceConfig
+
 
 @dataclass(frozen=True)
 class Config:
@@ -9,6 +11,7 @@ class Config:
     bind: str
     port: int
     data_dir: Path
+    source: SourceConfig | None = None
 
     @classmethod
     def from_env(cls, env=None):
@@ -30,4 +33,9 @@ class Config:
         data_dir = Path(env.get("TRANSCRIBER_DATA_DIR", "/data"))
         if not data_dir.is_absolute():
             raise ValueError("Data directory must be absolute")
-        return cls(token, env.get("TRANSCRIBER_BIND", "127.0.0.1"), port, data_dir)
+        source_url = env.get("AUDIOBOOKSHELF_URL", "")
+        source_id = env.get("AUDIOBOOKSHELF_SOURCE_ID", "")
+        if bool(source_url) != bool(source_id):
+            raise ValueError("Configure both Audiobookshelf URL and source ID")
+        source = SourceConfig(source_id, source_url) if source_url else None
+        return cls(token, env.get("TRANSCRIBER_BIND", "127.0.0.1"), port, data_dir, source)
