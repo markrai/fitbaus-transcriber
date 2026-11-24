@@ -17,7 +17,8 @@ POLL_SECONDS = 0.1
 TERMINATION_GRACE = 2
 SOURCE_ERRORS = frozenset(("unauthorized", "forbidden", "not_found", "stale_revision",
                            "source_failed", "upstream_unavailable", "invalid_manifest",
-                           "invalid_audio", "track_too_large"))
+                           "invalid_audio", "track_too_large", "source_unavailable", "invalid_source_response",
+                           "audio_too_large", "audio_transfer_timeout", "audio_size_mismatch"))
 
 
 def terminate_group(process):
@@ -123,7 +124,7 @@ def parent_death_guard(parent):
         os.killpg(os.getpgrp(), signal.SIGKILL)
     signal.signal(signal.SIGTERM, on_parent_death)
     libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0:
+    if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
         raise OSError(ctypes.get_errno(), "Cannot set parent death signal")
     if os.getppid() != parent:
         on_parent_death(None, None)
