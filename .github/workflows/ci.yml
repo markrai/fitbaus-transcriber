@@ -14,7 +14,7 @@ jobs:
           python-version: "3.12"
       - run: python -m unittest discover -s tests -v
       - run: python -m compileall -q transcriber
-      - run: bash -n deploy.sh
+      - run: bash -n deploy.sh && bash -n scripts/verify-release-image.sh
       - run: test -x deploy.sh
   container:
     runs-on: ubuntu-latest
@@ -35,17 +35,14 @@ jobs:
           docker compose exec -T transcriber python -m transcriber pair | grep -Ex '[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}'
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/readyz)" = 503
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/v1/capabilities)" = 401
-          curl -fsS -H "Authorization: Bearer $TRANSCRIBER_TOKEN" http://127.0.0.1:8765/v1/capabilities | python -c 'import json,sys; assert json.load(sys.stdin)["transcription"] is False'
-      - name: Verify CPU model with synthetic speech
+          curl -fsS -H "Authorization: Bearer $TRANSCRIBER_TOKEN" http://127.0.0.1:8765/v1/capabilities | python -c 'import json,sys; d=json.load(sys.stdin); assert d["transcription"] is False; assert d["model_present"] is True'
+      - name: Verify release image with synthetic speech
         timeout-minutes: 15
         env:
           TRANSCRIBER_TOKEN: ci-only-not-a-production-token-0123456789
+          TRANSCRIBER_IMAGE: fitbaus-transcriber:ci-release
         run: |
-          trap 'docker compose down -v' EXIT
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends espeak-ng
-          espeak-ng -s 140 -w "$RUNNER_TEMP/narration.wav" "Good morning. The sun is shining. This is a test of audiobook transcription."
-          chmod 644 "$RUNNER_TEMP/narration.wav"
-          docker compose run --rm --no-deps transcriber prepare-model
-          docker compose run --rm --no-deps --entrypoint python -e HF_HUB_OFFLINE=1 -e PYTHONPATH=/app -v "$RUNNER_TEMP/narration.wav:/narration.wav:ro" -v "$PWD/tests/verify_cpu.py:/verify_cpu.py:ro" transcriber /verify_cpu.py /narration.wav
-          docker compose run --rm --no-deps --entrypoint python -e HF_HUB_OFFLINE=1 -e PYTHONPATH=/app -v "$RUNNER_TEMP/narration.wav:/narration.wav:ro" -v "$PWD/tests/verify_api.py:/verify_api.py:ro" transcriber /verify_api.py /narration.wav
+          docker build --platform linux/amd64 --tag "$TRANSCRIBER_IMAGE" .
+          bash scripts/verify-release-image.sh
