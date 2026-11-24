@@ -2,6 +2,7 @@ import argparse
 import getpass
 import json
 import sys
+import signal
 import tempfile
 import http.client
 
@@ -110,10 +111,15 @@ def main(argv=None):
         else:
             with Service((config.bind, config.port), config) as server:
                 print("FitBaus Transcriber listening", flush=True)
+                def stop(signum, frame):
+                    raise KeyboardInterrupt
+                previous = signal.signal(signal.SIGTERM, stop)
                 try:
                     server.serve_forever()
                 except KeyboardInterrupt:
                     pass
+                finally:
+                    signal.signal(signal.SIGTERM, previous)
     except (SourceError, EngineError, QueueError) as error:
         print("Transcription failed: " + str(error), file=sys.stderr)
         return 1
