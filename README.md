@@ -26,16 +26,25 @@ Set `AUDIOBOOKSHELF_URL`, `AUDIOBOOKSHELF_SOURCE_ID` and, for access from the bi
 
 ```sh
 docker compose -f compose.release.yaml pull
-docker compose -f compose.release.yaml run --rm --no-deps transcriber prepare-model
 docker compose -f compose.release.yaml up -d --wait --wait-timeout 120
 docker compose -f compose.release.yaml exec transcriber python -m transcriber pair
 ```
 
-Model preparation is still a separate first-install step in this release phase. The model, queue, cached transcripts and pairing records remain in the named Compose volume. Do not run `down -v` when upgrading.
+Tiny is bundled in a read-only image directory. No model preparation or runtime download is required. The queue, cached transcripts, pairing records and any separately provisioned models remain in the named Compose volume. Do not run `down -v` when upgrading.
 
-For updates, back up the data volume, download the selected release's Compose file, change only `TRANSCRIBER_IMAGE` in your existing `.env` and repeat the pull, prepare-model (idempotent) and up commands. Keep the same project name and volume. To switch from a source-build installation, use the existing installation directory and project name, retain its `.env` and volume, and set the new image variable. Do not run source and release deployments concurrently against the same volume.
+For updates, back up the data volume, download the selected release's Compose file, change only `TRANSCRIBER_IMAGE` in your existing `.env` and repeat the pull and up commands. Keep the same project name and volume. To switch from a source-build installation, use the existing installation directory and project name, retain its `.env` and volume, and set the new image variable. Do not run source and release deployments concurrently against the same volume.
 
 Pin an image digest (`ghcr.io/markrai/fitbaus-transcriber@sha256:...`) for content-addressed deployments. Version tags are intended never to be overwritten, but registry tags are not inherently immutable. No floating `latest` tag is published in this phase.
+
+## Model policy
+
+| Model | Distribution | Intended use |
+| --- | --- | --- |
+| Tiny | Bundled, default | Live Read Along |
+| Base | Optional, not bundled | Candidate for live use after hardware qualification |
+| Small | Optional, not bundled | Background recommended |
+
+Only Tiny is executable in this phase. The authenticated capabilities response advertises the pinned model inventory; remote model downloads, activation, benchmarking and background job control are later phases. Medium and Large-v3 are not supported. Tiny retains its previous engine ID and language profile so existing cached transcripts remain compatible. Model weights are from [Systran's Faster-Whisper Tiny](https://huggingface.co/Systran/faster-whisper-tiny/tree/d90ca5fe260221311c53c58e660288d3deb8d356), a conversion of OpenAI Whisper under the MIT license. The corresponding [license notice](licenses/whisper-MIT.txt) is included in the image.
 
 ## Publishing releases
 
@@ -178,7 +187,7 @@ python -m unittest discover -s tests -v
 1. Headless service foundation, deployment and transcript contract.
 2. Audiobookshelf source authorization, audio identity and bounded audio ingestion.
 3. CPU speech recognition engine and durable revision/profile-aware job cache (implemented); asynchronous incremental transcript API (implemented).
-4. Versioned container publishing (implemented; first public release pending), bundled model and streamlined self-hosting installer (next).
+4. Versioned container publishing and bundled Tiny (implemented; first public release pending), optional model management and streamlined self-hosting installer (next).
 5. Optional FitBaus connection and on-demand Read Along.
 6. GPU acceleration and optional remote workers.
 
