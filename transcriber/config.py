@@ -4,6 +4,7 @@ from pathlib import Path
 
 from .audiobookshelf import SourceConfig
 from .engine import EngineConfig
+from .jobs import QueueLimits
 
 
 @dataclass(frozen=True)
@@ -14,6 +15,7 @@ class Config:
     data_dir: Path
     source: SourceConfig | None = None
     engine: EngineConfig = EngineConfig()
+    queue: QueueLimits = QueueLimits()
 
     @classmethod
     def from_env(cls, env=None):
@@ -46,4 +48,9 @@ class Config:
             language=None if language == "auto" else language,
             decode_timeout=int(env.get("TRANSCRIBER_DECODE_TIMEOUT", "120")),
         )
-        return cls(token, env.get("TRANSCRIBER_BIND", "127.0.0.1"), port, data_dir, source, engine)
+        queue = QueueLimits(
+            max_jobs=int(env.get("TRANSCRIBER_MAX_JOBS", "512")),
+            max_active=int(env.get("TRANSCRIBER_MAX_ACTIVE_JOBS", "64")),
+            cache_bytes=int(env.get("TRANSCRIBER_CACHE_MIB", "128")) * 1024 * 1024,
+        )
+        return cls(token, env.get("TRANSCRIBER_BIND", "127.0.0.1"), port, data_dir, source, engine, queue)
