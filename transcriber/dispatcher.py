@@ -57,8 +57,8 @@ class Dispatcher:
             return "idle"
 
     def cancel(self, job_id, token):
+        job = self.runner.status(job_id, token)
         with self.condition:
-            job = self.runner.status(job_id, token)
             if job_id == self.current:
                 raise QueueError("job_not_cancellable")
             self.runner.store.cancel(job.spec.id)
