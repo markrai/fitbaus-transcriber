@@ -65,6 +65,15 @@ class JobRunner:
         self._authorize(job, token)
         return job
 
+    def cancellable(self, job_id, token):
+        job = self.store.get(job_id)
+        manifest = self.source.manifest(job.spec.identity.item_id, token)
+        if (manifest.identity.source_id, manifest.identity.item_id) != (
+            job.spec.identity.source_id, job.spec.identity.item_id
+        ):
+            raise SourceError("not_found")
+        return job
+
     def result(self, job_id, token):
         job = self.status(job_id, token)
         if job.state != "ready":
