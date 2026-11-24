@@ -101,6 +101,8 @@ def inventory(data_dir, config, resources=None):
     result = []
     for name in MODELS:
         record = load_record(data_dir, name, config, resources)
+        if not model_present(model_directory(data_dir, name)):
+            record = {"state": "not_installed"}
         peak = record.get("peak_rss_bytes")
         result.append({"id": name, "qualification": record,
                        "admission": admission(name, resources, peak)})
