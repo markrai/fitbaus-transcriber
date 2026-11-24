@@ -249,6 +249,7 @@ class Background:
         self.execute = execute
         self.lock = threading.RLock()
         self.pending = OrderedDict()
+        self.guards = {}
         self.current = None
         self.control = None
         self.closed = False
@@ -281,10 +282,31 @@ class Background:
         if require_memory and not gate["allowed"]:
             raise QueueError("resource_unavailable")
 
-    def credential(self, token, refresh):
-        return (token, refresh, None)
+    def grant(self, job_id, token, refresh, guard):
+        if guard is not None and not guard():
+            raise SourceError("unauthorized")
+        if self.current == job_id and self.control is not None:
+            self.control.cancel()
+        self.pending[job_id] = (token, refresh, None)
+        if guard is None:
+            self.guards.pop(job_id, None)
+        else:
+            self.guards[job_id] = guard
 
-    def submit(self, identity, name, token, start=0, *, refresh=None):
+    def release(self, job_id):
+        self.pending.pop(job_id, None)
+        self.guards.pop(job_id, None)
+
+    def revoke_paired(self):
+        with self.lock:
+            for job_id in list(self.guards):
+                self.release(job_id)
+                if self.current == job_id and self.control is not None:
+                    self.control.cancel()
+            if self.current is None and self.spool_key and self.spool_key[0] not in self.pending:
+                self.drop_spool()
+
+    def submit(self, identity, name, token, start=0, *, refresh=None, guard=None):
         manifest = self.runner.source.manifest(identity.item_id, token)
         if manifest.identity != identity:
             raise SourceError("stale_revision")
@@ -292,9 +314,11 @@ class Background:
         with self.lock:
             if self.closed:
                 raise QueueError("worker_unavailable")
+            if guard is not None and not guard():
+                raise SourceError("unauthorized")
             job = self.store.submit(identity, name, profile(name, self.config), manifest.duration_ms, start)
             if job.state == "pending":
-                self.pending[job.id] = self.credential(token, refresh)
+                self.grant(job.id, token, refresh, guard)
             return self.status(job)
 
     def status(self, job):
@@ -314,7 +338,7 @@ class Background:
             result["authorization_renewable"] = bool(entry and entry[1])
             return result
 
-    def action(self, job_id, token, action, *, refresh=None):
+    def action(self, job_id, token, action, *, refresh=None, guard=None):
         job = self.store.get(job_id)
         self.authorize(job, token, exact=action == "resume")
         if action == "resume" and job.state not in ("completed", "cancelled"):
@@ -325,18 +349,20 @@ class Background:
             job = self.store.get(job_id)
             if action == "resume":
                 if job.state not in ("completed", "cancelled"):
+                    if guard is not None and not guard():
+                        raise SourceError("unauthorized")
                     job = self.store.transition(job_id, "pending")
-                    self.pending[job_id] = self.credential(token, refresh)
+                    self.grant(job_id, token, refresh, guard)
             else:
                 if action == "discard":
                     if self.current == job_id:
                         raise QueueError("background_busy")
                     self.store.discard(job_id)
-                    self.pending.pop(job_id, None)
+                    self.release(job_id)
                     return {"job_id": job_id, "discarded": True}
                 if self.current == job_id and self.control is not None:
                     self.control.cancel()
-                self.pending.pop(job_id, None)
+                self.release(job_id)
                 if self.current is None and self.spool_key and self.spool_key[0] == job_id:
                     self.drop_spool()
                 job = self.store.transition(job_id, "paused" if action == "pause" else "cancelled")
@@ -352,9 +378,13 @@ class Background:
             if self.closed or self.clock() < self.defer_until:
                 return None
             for job_id, (token, _, _) in list(self.pending.items()):
+                guard = self.guards.get(job_id)
+                if guard is not None and not guard():
+                    self.release(job_id)
+                    continue
                 job = self.store.get(job_id)
                 if job.state != "pending":
-                    self.pending.pop(job_id, None)
+                    self.release(job_id)
                     continue
                 self.current, self.control = job_id, control
                 return job, token
@@ -397,7 +427,7 @@ class Background:
             _, refresh, last = entry
             now = self.clock()
             if refresh is None or (last is not None and now - last < REFRESH_COOLDOWN):
-                self.pending.pop(job.id, None)
+                self.release(job.id)
                 self.drop_spool()
                 return
         try:
@@ -406,7 +436,7 @@ class Background:
         except (SourceError, QueueError, OSError):
             with self.lock:
                 if self.pending.get(job.id) is entry:
-                    self.pending.pop(job.id, None)
+                    self.release(job.id)
                     self.drop_spool()
             return
         with self.lock:
@@ -431,10 +461,14 @@ class Background:
                     self.spool_ready = True
                 self.authorize(job, token)
                 with self.lock:
+                    guard = self.guards.get(job.id)
+                    if guard is not None and not guard():
+                        self.release(job.id)
+                        control.cancel()
                     if not control.cancelled():
                         current = self.store.checkpoint(job, window)
                         if current.state == "completed":
-                            self.pending.pop(job.id, None)
+                            self.release(job.id)
         except (SourceError, EngineError, QueueError, OSError) as error:
             if isinstance(error, SourceError) and error.code == "unauthorized":
                 self.renew(job, token, control)
@@ -447,16 +481,16 @@ class Background:
                     elif code == "forbidden":
                         pending = self.pending.get(job.id)
                         if pending is not None and pending[0] == token:
-                            self.pending.pop(job.id, None)
+                            self.release(job.id)
                         self.drop_spool()
                     else:
                         self.store.transition(job.id, "failed", code)
-                        self.pending.pop(job.id, None)
+                        self.release(job.id)
         except Exception:
             with self.lock:
                 if not control.cancelled():
                     self.store.transition(job.id, "failed", "internal_error")
-                    self.pending.pop(job.id, None)
+                    self.release(job.id)
         finally:
             with self.lock:
                 self.current = None
@@ -470,6 +504,7 @@ class Background:
         with self.lock:
             self.closed = True
             self.pending.clear()
+            self.guards.clear()
             if self.control is not None:
                 self.control.cancel()
             else:
