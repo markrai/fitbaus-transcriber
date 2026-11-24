@@ -145,6 +145,10 @@ class JobStore:
         with self._transaction() as db:
             return self._get(db, job_id)
 
+    def touch(self, job_id):
+        with self._transaction() as db:
+            db.execute("UPDATE jobs SET touched=? WHERE id=? AND state='ready'", (time.time_ns(), job_id))
+
     @staticmethod
     def _evict(db, exclude=None):
         row = db.execute("""
