@@ -192,6 +192,35 @@ class Audiobookshelf:
                 raise SourceError("size_limit")
             yield chunk
 
+    def login(self, username, password):
+        if not isinstance(username, str) or not username.strip() or len(username) > 256:
+            raise ValueError("Invalid Audiobookshelf username")
+        if not isinstance(password, str) or len(password) > 4096:
+            raise ValueError("Invalid Audiobookshelf password")
+        request = Request(self.config.base_url + "/login",
+                          data=json.dumps({"username": username, "password": password}).encode("utf-8"),
+                          headers={"Content-Type": "application/json", "Accept": "application/json",
+                                   "Accept-Encoding": "identity"}, method="POST")
+        try:
+            with self.opener.open(request, timeout=self.timeout) as response:
+                if response.status != 200 or response.headers.get_content_type() != "application/json" or (
+                        response.headers.get("Content-Encoding", "identity").lower() != "identity"):
+                    raise SourceError("invalid_login_response")
+                data = b"".join(self._chunks(response, MAX_METADATA_BYTES, time.monotonic() + 30))
+            user = json.loads(data)["user"]
+            token = user.get("accessToken", user.get("token"))
+            if not valid_bearer(token):
+                raise SourceError("invalid_login_response")
+            return token
+        except HTTPError as error:
+            status = error.code
+            error.close()
+            raise SourceError("login_rejected" if status in (400, 401, 403) else "login_unavailable") from None
+        except (OSError, URLError, HTTPException):
+            raise SourceError("login_unavailable") from None
+        except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+            raise SourceError("invalid_login_response") from None
+
     def manifest(self, item_id, token):
         identifier(item_id)
         with self._get(f"/api/items/{item_id}?expanded=1", token) as response:
