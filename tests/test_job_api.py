@@ -111,6 +111,32 @@ class ApiTests(unittest.TestCase):
             time.sleep(0.02)
         self.fail("Job did not reach " + state)
 
+    def test_background_api_requires_source_access_and_completes(self):
+        background = self.server.background
+        background.check_model = lambda *args, **kwargs: None
+        background.execute = lambda source, identity, token, directory, engine, start, end, cancelled, fd: (
+            TranscriptWindow(identity, start, end, (Cue(start, end, "Background narration"),)))
+        body = {"source_id": "home", "item_id": "book",
+                "audio_revision": IDENTITY.audio_revision, "model": "small"}
+        self.assertEqual(self.request("POST", "/v1/background", body, operator=None)[0], 401)
+        self.assertEqual(self.request("POST", "/v1/background", body, user="denied")[0], 403)
+        code, job = self.request("POST", "/v1/background", body)
+        self.assertEqual(code, 202)
+        route = "/v1/background/" + job["job_id"]
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            status, result = self.request("GET", route)
+            self.assertEqual(status, 200)
+            if result["state"] == "completed":
+                break
+            time.sleep(0.02)
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(result["processed_ms"], 120000)
+        self.assertEqual(self.request("GET", route, user="denied")[0], 403)
+        self.assertEqual(self.request("GET", "/v1/items/book/background")[1]["jobs"][0]["job_id"], job["job_id"])
+        self.assertEqual(self.request("POST", route + "/discard")[0], 200)
+        self.assertEqual(self.request("GET", route)[0], 404)
+
     def test_readiness_distinguishes_model_availability(self):
         self.assertEqual(self.request("GET", "/readyz", operator=None, user=None)[0], 200)
         self.model_ready = False
