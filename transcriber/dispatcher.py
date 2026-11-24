@@ -9,9 +9,10 @@ CREDENTIAL_TTL_SECONDS = 600
 
 
 class Dispatcher:
-    def __init__(self, runner, capacity, credential_ttl=CREDENTIAL_TTL_SECONDS, clock=time.monotonic, background=None):
+    def __init__(self, runner, capacity, credential_ttl=CREDENTIAL_TTL_SECONDS, clock=time.monotonic, background=None, qualification=None):
         self.runner = runner
         self.background = background
+        self.qualification = qualification
         self.capacity = capacity
         self.credential_ttl = credential_ttl
         self.clock = clock
@@ -53,6 +54,8 @@ class Dispatcher:
             self.pending[job_id] = (token, self.clock() + self.credential_ttl)
             if self.background is not None:
                 self.background.preempt()
+            if self.qualification is not None:
+                self.qualification.preempt()
             self.condition.notify()
             return job, True
 
@@ -87,6 +90,7 @@ class Dispatcher:
     def _work(self):
         while True:
             background_work = None
+            qualification_work = None
             with self.condition:
                 while not self.closed:
                     self._expire()
@@ -98,6 +102,14 @@ class Dispatcher:
                         self.control = RunControl()
                         control = self.control
                         break
+                    if self.qualification is not None:
+                        control = RunControl()
+                        try:
+                            qualification_work = self.qualification.take(control)
+                        except Exception:
+                            qualification_work = None
+                        if qualification_work is not None:
+                            break
                     if self.background is not None:
                         control = RunControl()
                         try:
@@ -109,6 +121,9 @@ class Dispatcher:
                     self.condition.wait(timeout=1)
                 if self.closed:
                     return
+            if qualification_work is not None:
+                self.qualification.step(qualification_work, control)
+                continue
             if background_work is not None:
                 job, token = background_work
                 try:
@@ -135,6 +150,8 @@ class Dispatcher:
             self.pending.clear()
             if self.background is not None:
                 self.background.close()
+            if self.qualification is not None:
+                self.qualification.close()
             if self.control is not None:
                 self.control.cancel()
             self.condition.notify_all()
