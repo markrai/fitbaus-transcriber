@@ -48,6 +48,8 @@ class Dispatcher:
     def dispatch_state(self, job):
         with self.condition:
             self._expire()
+            if job.state == "ready":
+                return "idle"
             if job.spec.id == self.current:
                 return "processing"
             if job.spec.id in self.pending:
@@ -57,7 +59,7 @@ class Dispatcher:
             return "idle"
 
     def cancel(self, job_id, token):
-        job = self.runner.status(job_id, token)
+        job = self.runner.cancellable(job_id, token)
         with self.condition:
             if job_id == self.current:
                 raise QueueError("job_not_cancellable")
