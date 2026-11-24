@@ -110,7 +110,6 @@ def load_record(data_dir, name, config, resources):
         record = json.loads(record_path(data_dir, name).read_text())
         if record["fingerprint"] != fingerprint(name, config, resources) or (
                 record.get("sample_kind") not in (None, AUTOMATIC_SAMPLE_KIND)):
-
             return {"state": "stale"}
         return record
     except (OSError, ValueError, KeyError, TypeError):
@@ -131,7 +130,7 @@ def inventory(data_dir, config, resources=None):
 
 
 def qualify(data_dir, name, config, raw, lock_fd, probe=False, sampler=snapshot, runner=measure,
-            *, control=None, automatic=False):
+            *, control=None, automatic=False, on_run=None):
     model_spec(name)
     _, duration = parse_sample(raw, probe)
     resources = sampler()
@@ -155,6 +154,8 @@ def qualify(data_dir, name, config, raw, lock_fd, probe=False, sampler=snapshot,
             args = (data_dir, name, benchmark_config, raw, lock_fd, config.inference_timeout)
             result = runner(*args, cancelled=control.cancelled) if control is not None else runner(*args)
             record["runs"].append(result)
+            if on_run is not None:
+                on_run(len(record["runs"]))
         record["peak_rss_bytes"] = max(run["peak_rss_bytes"] for run in record["runs"])
         record["state"] = classify(record["runs"], duration, probe)
         record["admission"] = admission(name, sampler(), record["peak_rss_bytes"])
