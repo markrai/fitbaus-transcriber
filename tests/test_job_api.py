@@ -191,6 +191,54 @@ class ApiTests(unittest.TestCase):
         self.assertFalse(current["authorization_active"])
         self.assertEqual(current["processed_ms"], 0)
 
+    def test_revocation_cancels_active_and_releases_queued_paired_live_jobs(self):
+        self.release.clear()
+        _, device = self.server.pairing.redeem(self.server.pairing.issue())
+        def submit(start, end, operator):
+            return self.request("POST", "/v1/jobs", {
+                "source_id": "home", "item_id": "book",
+                "audio_revision": IDENTITY.audio_revision,
+                "start_ms": start, "end_ms": end,
+            }, operator=operator)
+        code, active = submit(0, 1000, device["token"])
+        self.assertEqual(code, 202)
+        self.assertTrue(self.entered.wait(3))
+        code, queued = submit(1000, 2000, device["token"])
+        self.assertEqual(code, 202)
+        code, operator_job = submit(2000, 3000, OPERATOR)
+        self.assertEqual(code, 202)
+        self.assertEqual(self.request("POST", "/v1/pairing/revoke-all")[0], 200)
+        dispatcher = self.server.dispatcher
+        with dispatcher.condition:
+            self.assertTrue(dispatcher.control.cancelled())
+            self.assertNotIn(queued["job_id"], dispatcher.pending)
+            self.assertIn(operator_job["job_id"], dispatcher.pending)
+        route = "/v1/jobs/" + queued["job_id"]
+        self.assertEqual(self.request("GET", route)[1]["dispatch"], "awaiting_credentials")
+        self.assertEqual(self.request("GET", route, operator=device["token"])[0], 401)
+        self.release.set()
+        self.assertEqual(self.wait_state(active["job_id"], "failed")["error"], "cancelled")
+        self.wait_state(operator_job["job_id"], "ready")
+        self.assertEqual(self.calls, 2)
+        self.assertEqual(submit(1000, 2000, OPERATOR)[0], 202)
+        self.wait_state(queued["job_id"], "ready")
+
+    def test_revoked_device_cannot_schedule_after_source_validation(self):
+        _, device = self.server.pairing.redeem(self.server.pairing.issue())
+        original = self.runner.submit
+        def submit_and_revoke(*args, **kwargs):
+            job = original(*args, **kwargs)
+            self.server.pairing.revoke_all()
+            return job
+        self.runner.submit = submit_and_revoke
+        status, body = self.request("POST", "/v1/jobs", {
+            "source_id": "home", "item_id": "book", "audio_revision": IDENTITY.audio_revision,
+            "start_ms": 0, "end_ms": 1000,
+        }, operator=device["token"])
+        self.assertEqual(status, 401)
+        self.assertEqual(body["error"], "unauthorized")
+        self.assertEqual(self.calls, 0)
+
     def test_qualification_retry_requires_pairing_or_local_operator(self):
         calls = []
         self.server.qualification.retry = lambda name: (calls.append(name) or True)

@@ -132,6 +132,18 @@ class Handler(BaseHTTPRequestHandler):
         except (OSError, sqlite3.Error):
             return False
 
+    def _device_guard(self):
+        if self._operator_authorized():
+            return None
+        pairing = self.server.pairing
+        device_token = self.headers["Authorization"][7:]
+        def guard():
+            try:
+                return pairing.authorized(device_token)
+            except (OSError, sqlite3.Error):
+                return False
+        return guard
+
     def _pairing_request(self):
         if self.path in ("/v1/pairing/issue", "/v1/pairing/revoke-all"):
             if self.client_address[0] not in ("127.0.0.1", "::1") or not self._operator_authorized():
@@ -140,6 +152,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"code": self.server.pairing.issue(), "expires_in": TTL_SECONDS})
             try:
                 self.server.pairing.revoke_all()
+                if self.server.dispatcher is not None:
+                    self.server.dispatcher.revoke_paired()
                 if self.server.background is not None:
                     self.server.background.revoke_paired()
                 return self._json(200, {"revoked": True})
@@ -273,7 +287,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("invalid_request")
             job = self.server.runner.submit(identity.item_id, token, body["start_ms"], body["end_ms"],
                                             identity.audio_revision, identity.source_id)
-            job, accepted = self.server.dispatcher.schedule(job, token, body.get("retry", False))
+            job, accepted = self.server.dispatcher.schedule(job, token, body.get("retry", False),
+                                                            guard=self._device_guard())
             return self._json(202 if accepted else 200, self._status(job))
         except TimeoutError:
             return self._json(408, {"error": "request_timeout"})
@@ -301,15 +316,7 @@ class Handler(BaseHTTPRequestHandler):
             leases = self.headers.get_all("X-FitBaus-Background-Lease") or []
             refreshes = self.headers.get_all("X-FitBaus-Background-Refresh") or []
             operator = self._operator_authorized()
-            guard = None
-            if not operator:
-                pairing = self.server.pairing
-                device_token = self.headers["Authorization"][7:]
-                def guard():
-                    try:
-                        return pairing.authorized(device_token)
-                    except (OSError, sqlite3.Error):
-                        return False
+            guard = self._device_guard()
             if leases or refreshes:
                 if operator and self.client_address[0] not in ("127.0.0.1", "::1"):
                     return self._json(401, {"error": "unauthorized"})

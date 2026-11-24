@@ -2,6 +2,7 @@ from collections import OrderedDict
 import threading
 import time
 
+from .audiobookshelf import SourceError
 from .jobs import MAX_ATTEMPTS, QueueError
 from .runner import RunControl
 
@@ -18,6 +19,7 @@ class Dispatcher:
         self.clock = clock
         self.pending = OrderedDict()
         self.current = None
+        self.current_guard = None
         self.control = None
         self.closed = False
         self.condition = threading.Condition()
@@ -28,16 +30,18 @@ class Dispatcher:
         if self.background is not None:
             self.background.expire()
         now = self.clock()
-        for job_id, (_, deadline) in list(self.pending.items()):
-            if deadline <= now:
+        for job_id, (_, deadline, guard) in list(self.pending.items()):
+            if deadline <= now or (guard is not None and not guard()):
                 del self.pending[job_id]
 
-    def schedule(self, job, token, retry=False):
+    def schedule(self, job, token, retry=False, *, guard=None):
         job_id = job.spec.id
         with self.condition:
             self._expire()
             if self.closed:
                 raise QueueError("worker_unavailable")
+            if guard is not None and not guard():
+                raise SourceError("unauthorized")
             if job.state == "ready":
                 return job, False
             job = self.runner.store.get(job_id)
@@ -51,7 +55,7 @@ class Dispatcher:
                 return job, False
             if job_id not in self.pending and len(self.pending) + int(self.current is not None) >= self.capacity:
                 raise QueueError("queue_full")
-            self.pending[job_id] = (token, self.clock() + self.credential_ttl)
+            self.pending[job_id] = (token, self.clock() + self.credential_ttl, guard)
             if self.background is not None:
                 self.background.preempt()
             if self.qualification is not None:
@@ -83,6 +87,16 @@ class Dispatcher:
             self.pending.pop(job_id, None)
             return False
 
+    def revoke_paired(self):
+        with self.condition:
+            for job_id, (_, _, guard) in list(self.pending.items()):
+                if guard is not None and not guard():
+                    self.pending.pop(job_id, None)
+            if self.current_guard is not None and not self.current_guard():
+                if self.control is not None:
+                    self.control.cancel()
+            self.condition.notify_all()
+
     def wake(self):
         with self.condition:
             self.condition.notify()
@@ -95,10 +109,11 @@ class Dispatcher:
                 while not self.closed:
                     self._expire()
                     if self.pending:
-                        job_id, (token, deadline) = self.pending.popitem(last=False)
-                        if deadline <= self.clock():
+                        job_id, (token, deadline, guard) = self.pending.popitem(last=False)
+                        if deadline <= self.clock() or (guard is not None and not guard()):
                             continue
                         self.current = job_id
+                        self.current_guard = guard
                         self.control = RunControl()
                         control = self.control
                         break
@@ -142,6 +157,8 @@ class Dispatcher:
                 token = None
                 with self.condition:
                     self.current = None
+                    self.current_guard = None
+                    guard = None
                     self.control = None
 
     def close(self):
