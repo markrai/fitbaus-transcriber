@@ -14,7 +14,8 @@ from .dispatcher import Dispatcher
 from .jobs import JobStore, QueueError, MAX_ATTEMPTS
 from .runner import JobRunner
 from .engine import ENGINE_ID, WhisperCpuEngine
-from .model import MODELS, DEFAULT_MODEL, model_directory, model_present
+from .model import DEFAULT_MODEL, model_directory, model_present
+from .model_downloads import ModelDownloads, DownloadError
 
 
 class Service(ThreadingHTTPServer):
@@ -27,6 +28,7 @@ class Service(ThreadingHTTPServer):
         self.source = Audiobookshelf(config.source) if config.source else None
         self.slots = threading.BoundedSemaphore(8)
         self.model_available = model_available or (lambda: model_present(model_directory(config.data_dir)))
+        self.downloads = ModelDownloads(config.data_dir, config.model_quota_mib)
         self.dispatcher = None
         self.runner = runner
         if self.source is not None and self.runner is None:
@@ -53,6 +55,7 @@ class Service(ThreadingHTTPServer):
         return None
 
     def server_close(self):
+        self.downloads.close()
         if self.dispatcher is not None:
             self.dispatcher.close()
         super().server_close()
@@ -160,18 +163,17 @@ class Handler(BaseHTTPRequestHandler):
                 "engine_id": ENGINE_ID,
                 "model_present": self.server.model_available(),
                 "default_model": DEFAULT_MODEL,
-                "models": [
-                    {"id": spec.name, "revision": spec.revision, "bundled": spec.bundled,
-                     "installed": model_present(model_directory(self.server.config.data_dir, spec.name)),
-                     "approximate_bytes": spec.approximate_bytes, "usage": spec.usage}
-                    for spec in MODELS.values()
-                ],
+                "models": self.server.downloads.inventory(),
+                "model_download_api": True,
+                "model_quota_mib": self.server.config.model_quota_mib,
                 "job_api": True,
                 "pairing_api": True,
                 "max_window_ms": MAX_WINDOW_MS,
                 "source_configured": self.server.source is not None,
                 "source_id": self.server.config.source.source_id if self.server.config.source else None,
             })
+        if self.path == "/v1/models":
+            return self._json(200, {"models": self.server.downloads.inventory(), "quota_mib": self.server.config.model_quota_mib})
         match = re.fullmatch(r"/v1/items/([A-Za-z0-9_-]{1,128})/manifest", self.path)
         if match:
             return self._manifest(match.group(1))
@@ -180,7 +182,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._job_request(match.group(1), "transcript" if match.group(2) else "status")
         return self._json(404, {"error": "not_found"})
 
+    def _manage_model(self, name, cancel=False):
+        if self.client_address[0] not in ("127.0.0.1", "::1") or not self._operator_authorized():
+            return self._json(401, {"error": "unauthorized"})
+        try:
+            accepted = self.server.downloads.cancel(name) if cancel else self.server.downloads.start(name)
+            return self._json(202 if accepted else 200, {"accepted": accepted, "models": self.server.downloads.inventory()})
+        except ValueError:
+            return self._json(400, {"error": "unsupported_model"})
+        except DownloadError as error:
+            return self._json(409, {"error": str(error)})
+        except (OSError, RuntimeError):
+            return self._json(503, {"error": "download_unavailable"})
+
     def do_POST(self):
+        match = re.fullmatch(r"/v1/models/([a-z0-9-]{1,32})/(download|cancel)", self.path)
+        if match:
+            return self._manage_model(match.group(1), match.group(2) == "cancel")
         if self.path in ("/v1/pairing/issue", "/v1/pairing/redeem", "/v1/pairing/revoke-all"):
             return self._pairing_request()
         if not self._authorized():

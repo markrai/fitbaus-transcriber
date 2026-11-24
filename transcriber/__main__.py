@@ -19,6 +19,10 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("serve")
     commands.add_parser("prepare-model")
+    commands.add_parser("models")
+    for name in ("download-model", "cancel-model-download"):
+        command = commands.add_parser(name)
+        command.add_argument("model", choices=("base", "small"))
     commands.add_parser("pair")
     commands.add_parser("revoke-pairings")
     discard = commands.add_parser("discard-job")
@@ -53,6 +57,20 @@ def main(argv=None):
                     print("Valid for 10 minutes; single use. Keep private.", file=sys.stderr)
                 else:
                     print("All paired device credentials revoked.")
+            finally:
+                client.close()
+        elif args.command in ("models", "download-model", "cancel-model-download"):
+            route = "/v1/models" if args.command == "models" else (
+                "/v1/models/" + args.model + ("/download" if args.command == "download-model" else "/cancel"))
+            client = http.client.HTTPConnection("127.0.0.1", config.port, timeout=10)
+            try:
+                client.request("GET" if args.command == "models" else "POST", route,
+                               headers={"Authorization": "Bearer " + config.token})
+                response = client.getresponse()
+                result = json.loads(response.read(16384))
+                print(json.dumps(result, indent=2))
+                if response.status not in (200, 202):
+                    return 1
             finally:
                 client.close()
         elif args.command == "prepare-model":
