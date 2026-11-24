@@ -160,18 +160,25 @@ class ApiTests(unittest.TestCase):
         self.source.identity = AudioIdentity("home", "book", "c" * 64)
         self.assertEqual(self.request("GET", "/v1/jobs/" + job_id + "/transcript")[0], 409)
 
-    def test_cancel_queued_but_not_running_and_enforce_capacity(self):
+    def test_cancel_queued_and_running_and_enforce_capacity(self):
         self.release.clear()
         first = self.submit()[1]["job_id"]
         self.assertTrue(self.entered.wait(3))
         second = self.submit(1000, 2000)[1]["job_id"]
         self.assertEqual(self.submit(2000, 3000)[0], 202)
         self.assertEqual(self.submit(3000, 4000)[0], 429)
-        self.assertEqual(self.request("DELETE", "/v1/jobs/" + first)[0], 409)
+        self.assertEqual(self.request("DELETE", "/v1/jobs/" + first, user="denied")[0], 403)
+        self.assertEqual(self.request("DELETE", "/v1/jobs/" + first)[0], 202)
         self.assertEqual(self.request("DELETE", "/v1/jobs/" + second, user="denied")[0], 403)
         self.assertEqual(self.request("DELETE", "/v1/jobs/" + second)[0], 200)
         self.assertEqual(self.request("GET", "/v1/jobs/" + second)[0], 404)
         self.assertEqual(self.submit(3000, 4000)[0], 202)
+        self.release.set()
+        self.assertEqual(self.wait_state(first, "failed")["error"], "cancelled")
+        self.assertEqual(self.request("GET", "/v1/jobs/" + first + "/transcript")[0], 409)
+        self.assertEqual(self.submit()[0], 200)
+        self.assertEqual(self.submit(retry=True)[0], 202)
+        self.wait_state(first, "ready")
 
     def test_restart_requires_fresh_credentials(self):
         self.stop_server()
