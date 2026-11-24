@@ -1,6 +1,6 @@
 # Transcript contract v1
 
-The transcriber and its consumers share the following data model. The foundation validates and serializes this model; no transcript HTTP route is exposed yet.
+The transcriber and its consumers share the following data model. The service validates and serializes this model. Completed windows are available through the [job API](JOB-API.md).
 
 ## Audio identity
 
@@ -54,9 +54,9 @@ Each requested window is intersected with the ordered source tracks. FFmpeg deco
 
 Permissions and manifest revision are checked again before returning the complete window. The operator-only CLI is the qualification entry point. The engine does not expose a public synchronous transcription endpoint; durable job processing, cancellation and aggregate resource limits belong to the next phase.
 
-## Future transport
+## Transport
 
-A later phase will expose authorized requests for bounded windows, distinguish pending, ready, failed, and stale revisions, and publish a client-facing API specification. Job submissions must be idempotent and bounded. The service must never accept an arbitrary media URL from a client or forward credentials to a redirected origin.
+The [job API](JOB-API.md) exposes authorized bounded windows and distinguishes queued, running, ready, failed, and stale revisions. Job submissions must be idempotent and bounded. The service must never accept an arbitrary media URL from a client or forward credentials to a redirected origin.
 
 Do not enable access to cached transcripts merely because the caller knows an item ID. Each request must be scoped to the configured source and the caller's authorized library access. The operator token in the foundation is not a substitute for this authorization model.
 

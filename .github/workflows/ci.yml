@@ -44,3 +44,4 @@ jobs:
           chmod 644 "$RUNNER_TEMP/narration.wav"
           docker compose run --rm --no-deps transcriber prepare-model
           docker compose run --rm --no-deps --entrypoint python -e HF_HUB_OFFLINE=1 -e PYTHONPATH=/app -v "$RUNNER_TEMP/narration.wav:/narration.wav:ro" -v "$PWD/tests/verify_cpu.py:/verify_cpu.py:ro" transcriber /verify_cpu.py /narration.wav
+          docker compose run --rm --no-deps --entrypoint python -e HF_HUB_OFFLINE=1 -e PYTHONPATH=/app -v "$RUNNER_TEMP/narration.wav:/narration.wav:ro" -v "$PWD/tests/verify_api.py:/verify_api.py:ro" transcriber /verify_api.py /narration.wav

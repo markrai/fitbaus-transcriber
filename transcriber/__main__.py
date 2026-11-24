@@ -18,6 +18,8 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("serve")
     commands.add_parser("prepare-model")
+    discard = commands.add_parser("discard-job")
+    discard.add_argument("--job-id", required=True)
     for name in ("transcribe", "submit"):
         run = commands.add_parser(name)
         run.add_argument("--item-id", required=True)
@@ -37,6 +39,11 @@ def main(argv=None):
         if args.command == "prepare-model":
             prepare_model(config.data_dir)
             print("Whisper CPU model prepared", file=sys.stderr)
+        elif args.command == "discard-job":
+            store = JobStore(config.data_dir / "queue", config.queue)
+            with store.worker():
+                store.cancel(args.job_id)
+            print(json.dumps({"job_id": args.job_id, "cancelled": True}))
         elif args.command in ("transcribe", "submit", "run-job", "read-job"):
             if config.source is None:
                 raise ValueError("Audiobookshelf source not configured")

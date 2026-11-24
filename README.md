@@ -6,7 +6,7 @@ FitBaus audiobook playback does not require this service. Transcription is an op
 
 ## Development status
 
-The foundation, Audiobookshelf source adapter, and CPU speech recognition engine are under development. An operator can now transcribe a bounded audiobook window locally using the CLI. The operator CLI now supports durable job submission, execution and persistent transcript caching. The service does **not** yet offer HTTP transcription jobs or transcript serving. No published production image is available.
+The foundation, Audiobookshelf source adapter, and CPU speech recognition engine are under development. An operator can now transcribe a bounded audiobook window locally using the CLI. The operator CLI now supports durable job submission, execution and persistent transcript caching. The asynchronous REST API now accepts bounded transcription jobs, reports status and serves completed transcript windows. No published production image is available.
 
 ## Run the foundation locally
 
@@ -95,7 +95,7 @@ docker compose run --rm --no-deps transcriber read-job --job-id YOUR_JOB_ID
 
 Each command prompts for an Audiobookshelf credential (or accepts `--token-stdin`). The queue stores job identities, state, attempt counts and results in SQLite under the persistent data volume. It never persists upstream credentials. Access and revision are checked before execution and before returning any cached transcript. Changing the engine profile, language, audio revision or window produces a different job ID.
 
-An exclusive Linux file lock prevents concurrent inference against the same data directory. On acquiring the worker lock, interrupted running jobs are recovered as queued unless their three-attempt budget is exhausted. Resume explicitly using `run-job` with a fresh credential; the queue does not automatically execute jobs after restart. A failed job can be retried up to three total attempts.
+An exclusive Linux file lock prevents concurrent inference against the same data directory. On acquiring the worker lock, interrupted running jobs are recovered as queued unless their three-attempt budget is exhausted. Resume explicitly using `run-job` or repeat an authorized HTTP submission with a fresh credential; credentials are never recovered from disk. A failed job can be retried up to three total attempts.
 
 | Variable | Default |
 | --- | --- |
@@ -105,18 +105,22 @@ An exclusive Linux file lock prevents concurrent inference against the same data
 
 Completed and failed jobs are evicted by recency when admission or result storage reaches its limits. Queued and running jobs are never evicted. Each result is capped at 1 MiB. The cache limit counts serialized transcript payloads; SQLite metadata, transaction journal, model files and temporary audio are additional disk usage. SQLite retains allocated pages for reuse after eviction. Use the same queue limits for all invocations sharing the data directory. Do not run this experimental queue on a network filesystem without reliable Linux file locking.
 
-No background dispatcher, HTTP job interface, cancellation or automatic credential renewal is provided yet. This slice is for operator qualification and the upcoming asynchronous API.
+The HTTP dispatcher runs one job at a time, in submission order. Pending credentials are memory-only and expire for dispatch after ten minutes. No automatic credential renewal or cancellation of running inference is provided. Use `discard-job --job-id YOUR_JOB_ID` locally (when no worker owns the data directory) to remove abandoned queued or failed jobs for deleted or inaccessible items.
 
 ## API
 
 | Endpoint | Authentication | Purpose |
 | --- | --- | --- |
 | GET /healthz | None | Process liveness |
-| GET /readyz | None | HTTP transcription readiness; currently HTTP 503 |
+| GET /readyz | None | HTTP job admission readiness |
 | GET /v1/capabilities | Bearer token | Version, source ID and available functionality |
 | GET /v1/items/{item_id}/manifest | Both credentials | Authorized audio identity and timeline |
+| POST /v1/jobs | Both credentials | Submit or resume an exact transcript window |
+| GET /v1/jobs/{job_id} | Both credentials | Job status and dispatch state |
+| GET /v1/jobs/{job_id}/transcript | Both credentials | Completed transcript window |
+| DELETE /v1/jobs/{job_id} | Both credentials | Discard queued or failed job |
 
-See [the transcript contract](docs/TRANSCRIPT-CONTRACT.md). The transcriber token is not an Audiobookshelf user credential. No HTTP transcript access is enabled until the authorization-preserving job API is implemented. The capability response reports model file presence separately from API readiness.
+See [the transcript contract](docs/TRANSCRIPT-CONTRACT.md). The transcriber token is not an Audiobookshelf user credential. See [the job API](docs/JOB-API.md) for request examples, retry rules and response semantics. Readiness means a configured source, present model files and live dispatcher; it is not a guarantee of upstream connectivity or successful model loading.
 
 ## Development
 
@@ -128,8 +132,8 @@ python -m unittest discover -s tests -v
 
 1. Headless service foundation, deployment and transcript contract.
 2. Audiobookshelf source authorization, audio identity and bounded audio ingestion.
-3. CPU speech recognition engine and durable revision/profile-aware job cache (implemented); asynchronous incremental transcript API (next).
-4. Versioned transcript window API, container images and streamlined self-hosting documentation.
+3. CPU speech recognition engine and durable revision/profile-aware job cache (implemented); asynchronous incremental transcript API (implemented).
+4. Container images and streamlined self-hosting documentation (next).
 5. Optional FitBaus connection and on-demand Read Along.
 6. GPU acceleration and optional remote workers.
 

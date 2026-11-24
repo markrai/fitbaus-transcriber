@@ -182,6 +182,13 @@ class JobStore:
                   spec.start_ms, spec.end_ms, spec.profile, time.time_ns()))
             return self._get(db, spec.id)
 
+    def cancel(self, job_id):
+        with self._transaction() as db:
+            job = self._get(db, job_id)
+            if job.state not in ("queued", "failed"):
+                raise QueueError("job_not_cancellable")
+            db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+
     def claim(self, job_id):
         with self._transaction() as db:
             job = self._get(db, job_id)
