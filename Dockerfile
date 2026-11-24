@@ -7,6 +7,7 @@ COPY requirements-cpu.txt /app/requirements-cpu.txt
 RUN pip install --no-cache-dir --only-binary=:all: -r /app/requirements-cpu.txt
 RUN groupadd --gid 10001 transcriber && useradd --uid 10001 --gid 10001 --no-create-home transcriber && mkdir /data && chown 10001:10001 /data
 COPY transcriber /app/transcriber
+RUN chmod -R a+rX /app/transcriber
 USER 10001:10001
 EXPOSE 8765
 ENTRYPOINT ["python", "-m", "transcriber"]
