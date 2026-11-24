@@ -141,7 +141,7 @@ Optional environment settings:
 | TRANSCRIBER_LANGUAGE | auto | Detect language or set a lowercase two-letter code such as en |
 | TRANSCRIBER_DECODE_TIMEOUT | 120 | FFmpeg timeout per track slice, in seconds (10–600) |
 
-This slice targets Linux containers with a seekable local audio file, FFmpeg and CPU wheels. Only one inference worker is admitted per shared data directory. The job runner does not yet enforce a hard inference deadline. The default model is deliberately small for an initial CPU baseline; accuracy and throughput need measurement on the actual server before selecting production profiles.
+This slice targets Linux containers with a seekable local audio file, FFmpeg and CPU wheels. Only one inference worker is admitted per shared data directory. The service retains the queue lock until the worker exits; source credentials are passed through a private stdin pipe, not persisted or placed on the command line. Fresh workers reload Tiny for every uncached window; cache hits do not spawn a worker. The job runner supervises each uncached window in a fresh process group with a configurable 120-second deadline (`TRANSCRIBER_INFERENCE_TIMEOUT`, 10–600 seconds). The worker is terminated on timeout or cancellation, and a subsequent window can start a new process. This is process isolation, not a separate memory cgroup; container-wide OOM remains possible. The default model is deliberately small for an initial CPU baseline; accuracy and throughput need measurement on the actual server before selecting production profiles.
 
 ## Durable jobs and cache
 

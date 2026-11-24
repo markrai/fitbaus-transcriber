@@ -3,6 +3,7 @@ import threading
 import time
 
 from .jobs import MAX_ATTEMPTS, QueueError
+from .runner import RunControl
 
 CREDENTIAL_TTL_SECONDS = 600
 
@@ -15,6 +16,7 @@ class Dispatcher:
         self.clock = clock
         self.pending = OrderedDict()
         self.current = None
+        self.control = None
         self.closed = False
         self.condition = threading.Condition()
         self.thread = threading.Thread(target=self._work, name="transcriber-worker", daemon=True)
@@ -64,9 +66,12 @@ class Dispatcher:
         job = self.runner.cancellable(job_id, token)
         with self.condition:
             if job_id == self.current:
-                raise QueueError("job_not_cancellable")
+                if self.control is None or not self.control.cancel():
+                    raise QueueError("job_not_cancellable")
+                return True
             self.runner.store.cancel(job.spec.id)
             self.pending.pop(job_id, None)
+            return False
 
     def _work(self):
         while True:
@@ -81,18 +86,23 @@ class Dispatcher:
                 if deadline <= self.clock():
                     continue
                 self.current = job_id
+                self.control = RunControl()
+                control = self.control
             try:
-                self.runner.run(job_id, token)
+                self.runner.run(job_id, token, control)
             except Exception:
                 pass
             finally:
                 token = None
                 with self.condition:
                     self.current = None
+                    self.control = None
 
     def close(self):
         with self.condition:
             self.closed = True
             self.pending.clear()
+            if self.control is not None:
+                self.control.cancel()
             self.condition.notify_all()
-        self.thread.join(timeout=2)
+        self.thread.join(timeout=5)

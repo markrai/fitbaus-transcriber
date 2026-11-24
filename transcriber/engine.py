@@ -23,6 +23,7 @@ class EngineConfig:
     cpu_threads: int = 2
     language: str | None = None
     decode_timeout: int = 120
+    inference_timeout: int = 120
 
     def __post_init__(self):
         if type(self.cpu_threads) is not int or not 1 <= self.cpu_threads <= 8:
@@ -34,6 +35,8 @@ class EngineConfig:
             raise ValueError("Language must be a lowercase two-letter code or auto")
         if type(self.decode_timeout) is not int or not 10 <= self.decode_timeout <= 600:
             raise ValueError("Invalid audio decoding timeout")
+        if type(self.inference_timeout) is not int or not 10 <= self.inference_timeout <= 600:
+            raise ValueError("Invalid inference worker timeout")
 
 
 def decode_pcm(file, start_ms, end_ms, timeout=120):

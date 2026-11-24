@@ -1,7 +1,9 @@
 import json
+import threading
 
 from .audiobookshelf import SourceError
-from .engine import ENGINE_ID, EngineError, transcribe_window
+from .engine import ENGINE_ID, EngineError
+from .inference_process import supervised_window
 from .jobs import JobSpec, QueueError
 
 
@@ -9,8 +11,25 @@ def engine_profile(config):
     return ENGINE_ID + "-segments-v1:" + (config.language or "auto")
 
 
+class RunControl:
+    def __init__(self):
+        self.gate = threading.Lock()
+        self.event = threading.Event()
+        self.finished = False
+
+    def cancel(self):
+        with self.gate:
+            if self.finished:
+                return False
+            self.event.set()
+            return True
+
+    def cancelled(self):
+        return self.event.is_set()
+
+
 class JobRunner:
-    def __init__(self, store, source, engine, directory, transcribe=transcribe_window):
+    def __init__(self, store, source, engine, directory, transcribe=None):
         self.store = store
         self.source = source
         self.engine = engine
@@ -35,30 +54,63 @@ class JobRunner:
         if job.spec.profile != engine_profile(self.engine.config):
             raise QueueError("profile_changed")
 
-    def run(self, job_id, token):
-        with self.store.worker():
-            job = self.store.get(job_id)
-            self._authorize(job, token)
-            job = self.store.claim(job_id)
-            if job.state == "ready":
-                return job
-            try:
-                window = self.transcribe(self.source, job.spec.identity, token, self.directory,
-                                         self.engine, job.spec.start_ms, job.spec.end_ms)
-                self._authorize(job, token)
-                return self.store.complete(job_id, window)
-            except SourceError:
-                self.store.fail(job_id, "source_failed")
-                raise
-            except EngineError:
-                self.store.fail(job_id, "engine_failed")
-                raise
-            except QueueError as error:
-                self.store.fail(job_id, "result_limit" if str(error) == "result_limit" else "internal_error")
-                raise
-            except Exception:
-                self.store.fail(job_id, "internal_error")
-                raise
+    def run(self, job_id, token, control=None):
+        control = control or RunControl()
+        claimed = False
+        try:
+            with self.store.worker() as lock_fd:
+                try:
+                    job = self.store.get(job_id)
+                    self._authorize(job, token)
+                    with control.gate:
+                        job = self.store.claim(job_id)
+                        if job.state == "ready":
+                            control.finished = True
+                            return job
+                        claimed = True
+                        if control.cancelled():
+                            raise EngineError("cancelled")
+                    args = (self.source, job.spec.identity, token, self.directory,
+                            self.engine, job.spec.start_ms, job.spec.end_ms)
+                    if self.transcribe is None:
+                        window = supervised_window(*args, control.cancelled, lock_fd)
+                    else:
+                        window = self.transcribe(*args)
+                    if control.cancelled():
+                        raise EngineError("cancelled")
+                    self._authorize(job, token)
+                    with control.gate:
+                        if control.cancelled():
+                            raise EngineError("cancelled")
+                        completed = self.store.complete(job_id, window)
+                        control.finished = True
+                        return completed
+                except Exception as error:
+                    with control.gate:
+                        if claimed:
+                            if control.cancelled():
+                                code = "cancelled"
+                            elif isinstance(error, SourceError):
+                                code = "source_failed"
+                            elif isinstance(error, EngineError):
+                                code = str(error) if str(error) in (
+                                    "inference_timeout", "worker_crashed", "worker_unavailable",
+                                    "invalid_worker_result", "cancelled") else "engine_failed"
+                            elif isinstance(error, QueueError) and str(error) == "result_limit":
+                                code = "result_limit"
+                            else:
+                                code = "internal_error"
+                            self.store.fail(job_id, code)
+                        elif control.cancelled():
+                            try:
+                                self.store.cancel(job_id)
+                            except QueueError:
+                                pass
+                        control.finished = True
+                    raise
+        finally:
+            with control.gate:
+                control.finished = True
 
     def status(self, job_id, token):
         job = self.store.get(job_id)
