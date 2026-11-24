@@ -23,6 +23,8 @@ MAX_PARENTS = 32
 MAX_BOOK_MS = 100 * 60 * 60 * 1000
 MAX_STAGE_BYTES = 128 * 1024 * 1024
 CREDENTIAL_TTL = 600
+UNATTENDED_TTL = 24 * 60 * 60
+REFRESH_COOLDOWN = 60
 
 
 def profile(name, config):
@@ -281,7 +283,10 @@ class Background:
         if require_memory and not gate["allowed"]:
             raise QueueError("resource_unavailable")
 
-    def submit(self, identity, name, token, start=0):
+    def credential(self, token, unattended, refresh):
+        return (token, self.clock() + (UNATTENDED_TTL if unattended else CREDENTIAL_TTL), refresh, None)
+
+    def submit(self, identity, name, token, start=0, *, unattended=False, refresh=None):
         manifest = self.runner.source.manifest(identity.item_id, token)
         if manifest.identity != identity:
             raise SourceError("stale_revision")
@@ -291,7 +296,7 @@ class Background:
                 raise QueueError("worker_unavailable")
             job = self.store.submit(identity, name, profile(name, self.config), manifest.duration_ms, start)
             if job.state == "pending":
-                self.pending[job.id] = (token, self.clock() + CREDENTIAL_TTL)
+                self.pending[job.id] = self.credential(token, unattended, refresh)
             return self.status(job)
 
     def status(self, job):
@@ -306,7 +311,7 @@ class Background:
                     state = "waiting_resources"
             return job.status(state)
 
-    def action(self, job_id, token, action):
+    def action(self, job_id, token, action, *, unattended=False, refresh=None):
         job = self.store.get(job_id)
         self.authorize(job, token, exact=action == "resume")
         if action == "resume" and job.state not in ("completed", "cancelled"):
@@ -318,7 +323,7 @@ class Background:
             if action == "resume":
                 if job.state not in ("completed", "cancelled"):
                     job = self.store.transition(job_id, "pending")
-                    self.pending[job_id] = (token, self.clock() + CREDENTIAL_TTL)
+                    self.pending[job_id] = self.credential(token, unattended, refresh)
             else:
                 if action == "discard":
                     if self.current == job_id:
@@ -336,7 +341,7 @@ class Background:
 
     def expire(self):
         with self.lock:
-            for job_id, (_, deadline) in list(self.pending.items()):
+            for job_id, (_, deadline, _, _) in list(self.pending.items()):
                 if deadline <= self.clock():
                     self.pending.pop(job_id, None)
             if self.current is None and self.spool_key and self.spool_key[0] not in self.pending:
@@ -346,7 +351,7 @@ class Background:
         with self.lock:
             if self.closed or self.clock() < self.defer_until:
                 return None
-            for job_id, (token, deadline) in list(self.pending.items()):
+            for job_id, (token, deadline, _, _) in list(self.pending.items()):
                 if deadline <= self.clock():
                     self.pending.pop(job_id, None)
                     continue
@@ -387,6 +392,34 @@ class Background:
             if self.control is not None:
                 self.control.cancel()
 
+    def renew(self, job, token, control):
+        with self.lock:
+            entry = self.pending.get(job.id)
+            if entry is None or entry[0] != token or control.cancelled():
+                return
+            _, deadline, refresh, last = entry
+            now = self.clock()
+            if deadline <= now or refresh is None or (last is not None and now - last < REFRESH_COOLDOWN):
+                self.pending.pop(job.id, None)
+                self.drop_spool()
+                return
+        try:
+            access, replacement = self.runner.source.refresh_session(refresh)
+            self.authorize(job, access)
+        except (SourceError, QueueError, OSError):
+            with self.lock:
+                if self.pending.get(job.id) is entry and not control.cancelled():
+                    self.pending.pop(job.id, None)
+                    self.drop_spool()
+            return
+        with self.lock:
+            if self.pending.get(job.id) is entry and not control.cancelled():
+                if self.clock() >= deadline:
+                    self.pending.pop(job.id, None)
+                else:
+                    self.pending[job.id] = (access, deadline, replacement, self.clock())
+                self.drop_spool()
+
     def step(self, job, token, control):
         try:
             with self.runner.store.worker() as fd:
@@ -409,12 +442,15 @@ class Background:
                         if current.state == "completed":
                             self.pending.pop(job.id, None)
         except (SourceError, EngineError, QueueError, OSError) as error:
+            if isinstance(error, SourceError) and error.code == "unauthorized":
+                self.renew(job, token, control)
+                return
             with self.lock:
                 if not control.cancelled():
                     code = str(error) if isinstance(error, (SourceError, EngineError, QueueError)) else "background_unavailable"
                     if code in ("worker_busy", "resource_unavailable"):
                         self.defer_until = self.clock() + 5
-                    elif code in ("unauthorized", "forbidden"):
+                    elif code == "forbidden":
                         pending = self.pending.get(job.id)
                         if pending is not None and pending[0] == token:
                             self.pending.pop(job.id, None)
