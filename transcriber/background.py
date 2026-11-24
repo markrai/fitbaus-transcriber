@@ -309,7 +309,11 @@ class Background:
                          else "waiting_credentials")
                 if state == "queued" and self.clock() < self.defer_until:
                     state = "waiting_resources"
-            return job.status(state)
+            result = job.status(state)
+            entry = self.pending.get(job.id)
+            result["authorization_remaining_seconds"] = max(0, int(entry[1] - self.clock())) if entry else 0
+            result["authorization_renewable"] = bool(entry and entry[2] and entry[1] > self.clock())
+            return result
 
     def action(self, job_id, token, action, *, unattended=False, refresh=None):
         job = self.store.get(job_id)
@@ -408,12 +412,12 @@ class Background:
             self.authorize(job, access)
         except (SourceError, QueueError, OSError):
             with self.lock:
-                if self.pending.get(job.id) is entry and not control.cancelled():
+                if self.pending.get(job.id) is entry:
                     self.pending.pop(job.id, None)
                     self.drop_spool()
             return
         with self.lock:
-            if self.pending.get(job.id) is entry and not control.cancelled():
+            if self.pending.get(job.id) is entry:
                 if self.clock() >= deadline:
                     self.pending.pop(job.id, None)
                 else:
