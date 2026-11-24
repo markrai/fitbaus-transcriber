@@ -239,6 +239,31 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(body["error"], "unauthorized")
         self.assertEqual(self.calls, 0)
 
+    def test_automatic_reauthorization_never_resumes_paused_or_replaces_grant(self):
+        background = self.server.background
+        background.check_model = lambda *args, **kwargs: None
+        job = background.store.submit(IDENTITY, "tiny", profile("tiny", self.engine.config), 120000)
+        route = "/v1/background/" + job.id
+        _, device = self.server.pairing.redeem(self.server.pairing.issue())
+        background.defer_until = time.monotonic() + 60
+        self.assertEqual(self.request("POST", route + "/reauthorize", user="denied")[0], 403)
+        background.store.transition(job.id, "paused")
+        status, value = self.request("POST", route + "/reauthorize", operator=device["token"])
+        self.assertEqual(status, 200)
+        self.assertEqual(value["state"], "paused")
+        self.assertNotIn(job.id, background.pending)
+        background.store.transition(job.id, "pending")
+        status, value = self.request("POST", route + "/reauthorize", operator=device["token"])
+        self.assertEqual(status, 202)
+        self.assertTrue(value["authorization_active"])
+        entry = background.pending[job.id]
+        self.assertEqual(self.request("POST", route + "/reauthorize")[0], 202)
+        self.assertIs(background.pending[job.id], entry)
+        with background.lock:
+            background.release(job.id)
+            background.store.transition(job.id, "cancelled")
+        self.assertEqual(self.request("POST", route + "/reauthorize")[1]["state"], "cancelled")
+
     def test_qualification_retry_requires_pairing_or_local_operator(self):
         calls = []
         self.server.qualification.retry = lambda name: (calls.append(name) or True)
