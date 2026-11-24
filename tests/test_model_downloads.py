@@ -121,7 +121,7 @@ class DownloadTests(unittest.TestCase):
         self.assertFalse(stage.exists())
         self.assertEqual(manager.inventory()[1]["state"], "interrupted")
 
-    def test_http_operator_controls_and_paired_read_only(self):
+    def test_http_operator_and_paired_model_controls(self):
         token = "a" * 64
         server = Service(("127.0.0.1", 0), Config(token, "127.0.0.1", 8765, self.data))
         server.downloads.spawn = sleeper
@@ -144,7 +144,9 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(status, 200)
         paired = result["token"]
         self.assertEqual(request("GET", "/v1/models", paired)[0], 200)
-        self.assertEqual(request("POST", "/v1/models/base/download", paired)[0], 401)
+        self.assertEqual(request("POST", "/v1/models/base/download", "invalid")[0], 401)
         self.assertEqual(request("POST", "/v1/models/medium/download", token)[0], 400)
-        self.assertEqual(request("POST", "/v1/models/base/download", token)[0], 202)
-        self.assertEqual(request("POST", "/v1/models/base/cancel", token)[0], 202)
+        self.assertEqual(request("POST", "/v1/models/base/download", paired)[0], 202)
+        self.assertEqual(request("POST", "/v1/models/base/cancel", paired)[0], 202)
+        server.pairing.revoke_all()
+        self.assertEqual(request("POST", "/v1/models/base/download", paired)[0], 401)
