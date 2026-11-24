@@ -201,6 +201,7 @@ class Handler(BaseHTTPRequestHandler):
                 "background_job_lifetime_authorization": True,
                 "paired_model_management": True,
                 "paired_background_refresh": True,
+                "background_reauthorize": True,
                 "source_url": self.server.config.source.base_url if self.server.config.source else None,
                 "running_job_cancel": True,
                 "inference_timeout_seconds": self.server.config.engine.inference_timeout,
@@ -266,7 +267,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(401, {"error": "unauthorized"})
         if self.path == "/v1/background":
             return self._background_request("submit")
-        match = re.fullmatch(r"/v1/background/([0-9a-f]{64})/(resume|pause|cancel|discard)", self.path)
+        match = re.fullmatch(r"/v1/background/([0-9a-f]{64})/(resume|pause|cancel|discard|reauthorize)", self.path)
         if match:
             return self._background_request(match.group(2), match.group(1))
         if self.path != "/v1/jobs":
@@ -345,7 +346,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 result = background.action(identifier, token, action, refresh=refresh, guard=guard)
             self.server.dispatcher.wake()
-            return self._json(202 if action in ("submit", "resume") and
+            return self._json(202 if action in ("submit", "resume", "reauthorize") and
                               result.get("state") in ("queued", "processing", "waiting_resources") else 200, result)
         except TimeoutError:
             return self._json(408, {"error": "request_timeout"})
