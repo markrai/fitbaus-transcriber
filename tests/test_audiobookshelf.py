@@ -55,10 +55,9 @@ class UpstreamHandler(BaseHTTPRequestHandler):
         if self.path == "/audiobookshelf/api/items/book-1?expanded=1":
             return self.reply(200, json.dumps(server.payload).encode())
         if self.path == "/audiobookshelf/api/items/book-1/file/123":
-            self.reply(200, server.audio, "audio/mpeg")
             if server.change_after_audio:
                 server.payload["media"]["tracks"][0]["metadata"]["mtimeMs"] += 1
-            return
+            return self.reply(200, server.audio, "audio/mpeg")
         return self.reply(404, b"missing")
 
 
