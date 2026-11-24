@@ -1,0 +1,38 @@
+services:
+  transcriber:
+    image: ${TRANSCRIBER_IMAGE:?Set TRANSCRIBER_IMAGE to a published version or digest}
+    restart: unless-stopped
+    environment:
+      TRANSCRIBER_TOKEN: ${TRANSCRIBER_TOKEN:?Set TRANSCRIBER_TOKEN in .env}
+      TRANSCRIBER_PORT: "8765"
+      AUDIOBOOKSHELF_URL: ${AUDIOBOOKSHELF_URL:-}
+      AUDIOBOOKSHELF_SOURCE_ID: ${AUDIOBOOKSHELF_SOURCE_ID:-}
+      TRANSCRIBER_CPU_THREADS: ${TRANSCRIBER_CPU_THREADS:-2}
+      TRANSCRIBER_LANGUAGE: ${TRANSCRIBER_LANGUAGE:-auto}
+      TRANSCRIBER_DECODE_TIMEOUT: ${TRANSCRIBER_DECODE_TIMEOUT:-120}
+      TRANSCRIBER_MAX_JOBS: ${TRANSCRIBER_MAX_JOBS:-512}
+      TRANSCRIBER_MAX_ACTIVE_JOBS: ${TRANSCRIBER_MAX_ACTIVE_JOBS:-64}
+      TRANSCRIBER_CACHE_MIB: ${TRANSCRIBER_CACHE_MIB:-128}
+    ports:
+      - "${TRANSCRIBER_LAN_BIND:-127.0.0.1}:${TRANSCRIBER_HOST_PORT:-8765}:8765"
+    volumes:
+      - transcriber-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: ${TRANSCRIBER_MEMORY_LIMIT:-2g}
+    cpus: ${TRANSCRIBER_CPU_LIMIT:-2.0}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=2).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  transcriber-data:
