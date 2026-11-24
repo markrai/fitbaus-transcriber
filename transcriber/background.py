@@ -266,6 +266,14 @@ class Background:
                 job = self.store.transition(job_id, "paused" if action == "pause" else "cancelled")
             return self.status(job)
 
+    def expire(self):
+        with self.lock:
+            for job_id, (_, deadline) in list(self.pending.items()):
+                if deadline <= self.clock():
+                    self.pending.pop(job_id, None)
+            if self.current is None and self.spool_key and self.spool_key[0] not in self.pending:
+                self.drop_spool()
+
     def take(self, control):
         with self.lock:
             if self.closed or self.clock() < self.defer_until:
@@ -278,7 +286,6 @@ class Background:
                 if job.state != "pending":
                     self.pending.pop(job_id, None)
                     continue
-                self.pending.move_to_end(job_id)
                 self.current, self.control = job_id, control
                 return job, token
             if self.current is None:
@@ -292,13 +299,13 @@ class Background:
         self.spool_key = None
         self.spool_ready = False
 
-    def prepare_spool(self, job, manifest, end):
+    def prepare_spool(self, job, manifest, end, token):
         track = next((t for t in manifest.tracks if t.offset_ms <= job.cursor_ms
                       and end <= t.offset_ms + t.duration_ms), None)
         if track is None or track.size > MAX_TRACK_BYTES:
             self.drop_spool()
             return None
-        key = (job.id, track.file_id)
+        key = (job.id, track.file_id, hashlib.sha256(token.encode("ascii")).digest())
         if self.spool_key != key:
             self.drop_spool()
             if shutil.disk_usage(self.runner.directory).free < track.size + 256 * 1024 * 1024:
@@ -321,7 +328,7 @@ class Background:
                 self.check_model(job.model)
                 engine = WhisperCpuEngine(self.runner.directory, self.config, model_name=job.model)
                 end = min(job.cursor_ms + MAX_WINDOW_MS, job.duration_ms)
-                spool = self.prepare_spool(job, manifest, end) if self.execute is supervised_window else None
+                spool = self.prepare_spool(job, manifest, end, token) if self.execute is supervised_window else None
                 args = (self.runner.source, job.identity, token, self.runner.directory,
                         engine, job.cursor_ms, end, control.cancelled, fd)
                 window = self.execute(*args, spool=spool) if spool is not None else self.execute(*args)
