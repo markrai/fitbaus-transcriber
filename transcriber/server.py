@@ -14,7 +14,7 @@ from .dispatcher import Dispatcher
 from .jobs import JobStore, QueueError, MAX_ATTEMPTS
 from .runner import JobRunner
 from .engine import ENGINE_ID, WhisperCpuEngine
-from .model import model_directory, model_present
+from .model import MODELS, DEFAULT_MODEL, model_directory, model_present
 
 
 class Service(ThreadingHTTPServer):
@@ -159,6 +159,13 @@ class Handler(BaseHTTPRequestHandler):
                 "transcription": self.server.readiness() is None,
                 "engine_id": ENGINE_ID,
                 "model_present": self.server.model_available(),
+                "default_model": DEFAULT_MODEL,
+                "models": [
+                    {"id": spec.name, "revision": spec.revision, "bundled": spec.bundled,
+                     "installed": model_present(model_directory(self.server.config.data_dir, spec.name)),
+                     "approximate_bytes": spec.approximate_bytes, "usage": spec.usage}
+                    for spec in MODELS.values()
+                ],
                 "job_api": True,
                 "pairing_api": True,
                 "max_window_ms": MAX_WINDOW_MS,
