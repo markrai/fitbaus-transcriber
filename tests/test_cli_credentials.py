@@ -19,6 +19,12 @@ class CredentialTests(unittest.TestCase):
             self.assertEqual(source_credential(self.config(), False), "issued-token")
             adapter.return_value.login.assert_called_once_with("reader", "password")
 
+    def test_renewable_login_is_opt_in(self):
+        with patch("sys.stdin.isatty", return_value=True), patch("builtins.input", side_effect=["", "reader"]), patch("getpass.getpass", return_value="password"), patch("transcriber.__main__.Audiobookshelf") as adapter:
+            adapter.return_value.login_session.return_value = ("access", "refresh")
+            self.assertEqual(source_credential(self.config(), False, renewable=True), ("access", "refresh"))
+            adapter.return_value.login_session.assert_called_once_with("reader", "password")
+
     def test_api_key_alternative(self):
         with patch("sys.stdin.isatty", return_value=True), patch("builtins.input", return_value="2"), patch("getpass.getpass", return_value="api-key"), patch("transcriber.__main__.Audiobookshelf") as adapter:
             self.assertEqual(source_credential(self.config(), False), "api-key")
