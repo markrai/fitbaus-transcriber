@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
+from http.client import HTTPException
 import json
 import math
 import re
@@ -63,11 +64,11 @@ class Track:
     offset_ms: int
     duration_ms: int
     size: int
-    mtime_ms: int
-    ctime_ms: int
+    mtime_us: int
+    ctime_us: int
 
     def revision_row(self):
-        return [self.file_id, self.offset_ms, self.duration_ms, self.size, self.mtime_ms, self.ctime_ms]
+        return [self.file_id, self.offset_ms, self.duration_ms, self.size, self.mtime_us, self.ctime_us]
 
 
 @dataclass(frozen=True)
@@ -99,6 +100,12 @@ def _integer(value, minimum=0):
     return value
 
 
+def _file_time(value):
+    if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 2**53 / 1000:
+        raise ValueError("Invalid audio file timestamp")
+    return math.floor(value * 1000 + 0.5)
+
+
 def _milliseconds(value):
     if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= MAX_TIME_MS / 1000:
         raise ValueError("Invalid audio timing")
@@ -124,11 +131,11 @@ def parse_manifest(config, item_id, payload):
             raise ValueError("Unexpected audiobook file endpoint")
         offset = _milliseconds(row["startOffset"])
         duration = _milliseconds(row["duration"])
-        if abs(offset - end) > 1 or duration <= 0 or offset + duration > MAX_TIME_MS:
+        if (not tracks and offset != 0) or abs(offset - end) > 1 or duration <= 0 or offset + duration > MAX_TIME_MS:
             raise ValueError("Invalid audio timeline")
         metadata = row["metadata"]
         track = Track(file_id, offset, duration, _integer(metadata["size"], 1),
-                      _integer(metadata["mtimeMs"]), _integer(metadata["ctimeMs"]))
+                      _file_time(metadata["mtimeMs"]), _file_time(metadata["ctimeMs"]))
         tracks.append(track)
         end = offset + duration
     encoded = json.dumps(
@@ -169,7 +176,7 @@ class Audiobookshelf:
             status = error.code
             error.close()
             raise SourceError({401: "unauthorized", 403: "forbidden", 404: "not_found"}.get(status, "upstream_error")) from None
-        except (OSError, URLError) as error:
+        except (OSError, URLError, HTTPException):
             raise SourceError("upstream_unavailable") from None
 
     def _chunks(self, response, limit, deadline):
