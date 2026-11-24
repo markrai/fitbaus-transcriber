@@ -80,7 +80,7 @@ docker compose exec transcriber python -m transcriber background-status --job-id
 docker compose exec transcriber python -m transcriber background-resume --job-id JOB_ID
 ```
 
-Supply the Audiobookshelf user's access token or API key at the hidden prompt. Each job can process a whole book or start at an aligned five-minute offset using `--start-ms`. Live Read Along takes priority and can preempt background work. Completed windows and progress are stored together in a separate bounded staging database; these results are not yet used by Read Along. A restart or expired in-memory credential requires an explicit resume. Use `background-list --item-id BOOK_ID`, `background-pause`, `background-cancel` or `background-discard` as needed. See [background job API](docs/BACKGROUND-JOBS.md).
+Choose username/password (default) or an existing access token/API key at the interactive prompt. Passwords are exchanged directly with the configured Audiobookshelf server and are never saved. HTTPS is recommended; HTTP login requires explicit confirmation. Each job can process a whole book or start at an aligned five-minute offset using `--start-ms`. Live Read Along takes priority and can preempt background work. Completed windows and progress are stored together in a separate bounded staging database; these results are not yet used by Read Along. A restart or expired in-memory credential requires an explicit resume. Use `background-list --item-id BOOK_ID`, `background-pause`, `background-cancel` or `background-discard` as needed. See [background job API](docs/BACKGROUND-JOBS.md).
 
 ## Publishing releases
 
@@ -150,7 +150,7 @@ Run a 60-second test on a book (substitute its library item ID):
 docker compose run --rm --no-deps transcriber transcribe --item-id YOUR_BOOK_ID --start-ms 0 --end-ms 60000
 ```
 
-Enter the Audiobookshelf user's API key or access token at the hidden prompt. For scripted use, `--token-stdin` reads the credential from standard input; never put it in command-line arguments. The CLI returns a JSON transcript window to standard output. If the book is shorter than 60 seconds, reduce the end time. A failed operation produces no ready transcript. Each invocation processes at most five minutes of book time. Audio ingestion still downloads the relevant complete source track(s), subject to the 512 MiB per-track limit; partial remote audio reads are a future optimization.
+Choose username/password or an existing access token/API key at the interactive prompt. For scripted use, `--token-stdin` reads the credential from standard input; never put it in command-line arguments. The CLI returns a JSON transcript window to standard output. If the book is shorter than 60 seconds, reduce the end time. A failed operation produces no ready transcript. Each invocation processes at most five minutes of book time. Audio ingestion still downloads the relevant complete source track(s), subject to the 512 MiB per-track limit; partial remote audio reads are a future optimization.
 
 Optional environment settings:
 
