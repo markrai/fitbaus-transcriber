@@ -142,3 +142,10 @@ No cloud service, web administration interface or FitBaus installation is requir
 ## License
 
 AGPL-3.0. See [LICENSE](LICENSE).
+
+
+## Pair a FitBaus bike
+
+With the service running, use `docker compose exec transcriber pair`. Enter the displayed XXXX-XXXX code in Settings → Transcriber on the bike. Codes expire after ten minutes, are single-use, and are invalidated after five incorrect attempts. Issuing another code replaces the previous code. Restarting the service invalidates outstanding codes, not paired credentials. The bike receives its own random 256-bit bearer credential; the operator token stays on the server. Device credential hashes persist in the data volume (maximum 32 credentials). To revoke all paired credentials, run `docker compose exec transcriber revoke-pairings`; the operator token and cached transcripts remain unaffected. Disconnect on the bike removes its local credential; revoke-pairings also invalidates credentials from lost devices.
+
+Use HTTPS for untrusted networks. Plain HTTP pairing and bearer traffic are not encrypted; bind only to a trusted LAN address for local testing and do not expose the port publicly. Pairing does not grant Audiobookshelf access: each item/job request still requires the caller's Audiobookshelf credential.
