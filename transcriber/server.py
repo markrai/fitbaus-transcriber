@@ -154,9 +154,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("invalid_request")
             job = self.server.runner.submit(identity.item_id, token, body["start_ms"], body["end_ms"],
                                             identity.audio_revision, identity.source_id)
-            job = self.server.dispatcher.schedule(job, token, body.get("retry", False))
-            return self._json(200 if job.state in ("ready", "failed") and
-                              self.server.dispatcher.dispatch_state(job) == "idle" else 202, self._status(job))
+            job, accepted = self.server.dispatcher.schedule(job, token, body.get("retry", False))
+            return self._json(202 if accepted else 200, self._status(job))
+        except TimeoutError:
+            return self._json(408, {"error": "request_timeout"})
         except (ValueError, TypeError, UnicodeError, RecursionError):
             return self._json(400, {"error": "invalid_request"})
         except (SourceError, QueueError) as error:
