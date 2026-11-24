@@ -13,7 +13,7 @@ import time
 import wave
 
 from .engine import EngineConfig, EngineError, WhisperCpuEngine
-from .inference_process import parent_death_guard, terminate_group
+from .inference_process import parent_death_guard, request_input, terminate_group
 from .model import MODELS, model_directory, model_present, model_spec
 from .resources import admission, fingerprint, snapshot
 
@@ -40,22 +40,24 @@ def parse_sample(raw, probe=False):
     return pcm, frames * 1000 // 16000
 
 
-def measure(data_dir, name, config, raw, lock_fd, timeout=120, cancelled=lambda: False):
+def measure(data_dir, name, config, raw, lock_fd, timeout=120, cancelled=lambda: False, *, command=None):
     if cancelled():
         raise EngineError("cancelled")
     started = time.monotonic()
     env = {key: value for key, value in os.environ.items()
            if key not in ("TRANSCRIBER_TOKEN", "TRANSCRIBER_TOKEN_FILE", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN")}
     env.update(HF_HUB_OFFLINE="1", HF_HUB_DISABLE_IMPLICIT_TOKEN="1")
-    command = [sys.executable, "-m", "transcriber.qualification", str(os.getpid()),
+    command = command or [sys.executable, "-m", "transcriber.qualification", str(os.getpid()),
                str(data_dir), name, json.dumps(asdict(config))]
-    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=subprocess.DEVNULL, start_new_session=True,
-                               pass_fds=(lock_fd,), env=env)
+    if len(raw) > MAX_WAV_BYTES:
+        raise EngineError("invalid_benchmark_sample")
+    with request_input(raw) as stream:
+        process = subprocess.Popen(command, stdin=stream, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, start_new_session=True,
+                                   pass_fds=(lock_fd,), env=env)
     finished = False
     try:
         deadline = started + timeout
-        request = raw
         while True:
             if cancelled():
                 raise EngineError("cancelled")
@@ -63,14 +65,16 @@ def measure(data_dir, name, config, raw, lock_fd, timeout=120, cancelled=lambda:
             if remaining <= 0:
                 raise EngineError("benchmark_timeout")
             try:
-                output, _ = process.communicate(input=request, timeout=min(0.1, remaining))
+                output, _ = process.communicate(timeout=min(0.1, remaining))
                 finished = True
                 break
             except subprocess.TimeoutExpired:
-                request = None
+                continue
         if cancelled():
             raise EngineError("cancelled")
         elapsed = time.monotonic() - started
+        if elapsed >= timeout:
+            raise EngineError("benchmark_timeout")
         if process.returncode != 0:
             raise EngineError("benchmark_worker_failed")
         if len(output) > MAX_OUTPUT_BYTES:
@@ -88,7 +92,6 @@ def measure(data_dir, name, config, raw, lock_fd, timeout=120, cancelled=lambda:
     finally:
         if not finished:
             terminate_group(process)
-        process.stdin.close()
         process.stdout.close()
 
 

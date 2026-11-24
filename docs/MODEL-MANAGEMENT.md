@@ -1,6 +1,6 @@
 # Optional model management
 
-Tiny is bundled, default and the only executable model in this phase. Base and Small are the only optional models. All three use pinned revisions. Medium and Large-v3 are unsupported.
+Tiny is bundled, default and the only live inference model. Qualified Base and Small can prepare books in the background. Base and Small are the only optional models. All three use pinned revisions. Medium and Large-v3 are unsupported.
 
 ## Inventory
 
@@ -10,7 +10,7 @@ States: not_installed, downloading, verifying, installed, failed, cancelled, int
 
 ## Administrative operations
 
-These routes require both the operator bearer and a loopback peer. Paired tokens are read-only.
+These routes require a paired device bearer or the operator bearer from a loopback peer.
 
 - POST /v1/models/base/download (or small)
 - POST /v1/models/base/cancel (or small)
@@ -23,4 +23,4 @@ No audiobook audio or Audiobookshelf credential is sent to the model host. Downl
 
 ## Deferred
 
-Admin permission for bike-initiated download, removal, inference model selection, hardware qualification, inference isolation and durable background audiobook jobs are separate phases.
+Model removal and optional live model activation are not implemented. Automatic hardware qualification and durable background preparation are supported; see [qualification](QUALIFICATION.md) and [background jobs](BACKGROUND-JOBS.md).

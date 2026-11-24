@@ -40,6 +40,22 @@ curl -fsS -H "Authorization: Bearer $TRANSCRIBER_TOKEN" http://127.0.0.1:18765/v
     python -c 'import json,sys; d=json.load(sys.stdin); assert d["transcription"] is False; assert d["model_present"] is True; assert d["default_model"] == "tiny"; assert [(m["id"],m["installed"]) for m in d["models"]] == [("tiny",True),("base",False),("small",False)]'
 "${compose[@]}" exec -T transcriber python -m transcriber pair | grep -Ex '[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}'
 
+if "${compose[@]}" exec -T transcriber python -m transcriber doctor > "$scratch/doctor.json"; then
+    echo 'Doctor unexpectedly reported readiness without a source.' >&2
+    exit 1
+fi
+python -c 'import json,sys; d=json.load(open(sys.argv[1])); assert not d["ready"]; assert d["readiness"]["reason"] == "source_not_configured"' "$scratch/doctor.json"
+"${compose[@]}" run --rm --no-deps --pull never -T \
+    -e AUDIOBOOKSHELF_URL=http://192.168.1.20:13378 -e AUDIOBOOKSHELF_SOURCE_ID=ci-source \
+    transcriber check-config
+"${compose[@]}" exec -T transcriber python -c 'from pathlib import Path; Path("/data/backup-probe").write_text("persistent")'
+"${compose[@]}" stop -t 30 transcriber
+"${compose[@]}" run --rm --no-deps --pull never -T --entrypoint tar transcriber -C /data -cf - . > "$scratch/backup.tar"
+tar -tf "$scratch/backup.tar" | grep -Fx './backup-probe'
+test "$(tar -xOf "$scratch/backup.tar" ./backup-probe)" = persistent
+"${compose[@]}" up -d --no-build --pull never --wait --wait-timeout 120
+"${compose[@]}" exec -T transcriber python -c 'from pathlib import Path; assert Path("/data/backup-probe").read_text() == "persistent"'
+
 espeak-ng -s 140 -w "$scratch/narration.wav" "Good morning. The sun is shining. This is a test of audiobook transcription."
 chmod 644 "$scratch/narration.wav"
 "${compose[@]}" exec -T transcriber python -c 'from pathlib import Path; from transcriber.model import model_directory; p=model_directory(Path("/data")); assert p.is_relative_to("/opt/fitbaus-models"); assert not Path("/data/models").exists()'

@@ -37,6 +37,15 @@ def terminate_group(process):
     process.wait()
 
 
+@contextmanager
+def request_input(raw):
+    with os.fdopen(os.memfd_create("fitbaus-worker-input", os.MFD_CLOEXEC), "w+b") as stream:
+        stream.write(raw)
+        stream.flush()
+        stream.seek(0)
+        yield stream
+
+
 def supervise(payload, timeout, cancelled, lock_fd, command=None, spawn=subprocess.Popen, audio_fd=None):
     if cancelled():
         raise EngineError("cancelled")
@@ -48,9 +57,12 @@ def supervise(payload, timeout, cancelled, lock_fd, command=None, spawn=subproce
     process = None
     finished = False
     try:
-        process = spawn(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                        start_new_session=True, pass_fds=(lock_fd,) if audio_fd is None else (lock_fd, audio_fd), env=env)
         request = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+        if len(request) > 32768:
+            raise EngineError("invalid_worker_result")
+        with request_input(request) as stream:
+            process = spawn(command, stdin=stream, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            start_new_session=True, pass_fds=(lock_fd,) if audio_fd is None else (lock_fd, audio_fd), env=env)
         while True:
             if cancelled():
                 raise EngineError("cancelled")
@@ -58,11 +70,11 @@ def supervise(payload, timeout, cancelled, lock_fd, command=None, spawn=subproce
             if remaining <= 0:
                 raise EngineError("inference_timeout")
             try:
-                output, _ = process.communicate(input=request, timeout=min(POLL_SECONDS, remaining))
+                output, _ = process.communicate(timeout=min(POLL_SECONDS, remaining))
                 finished = True
                 break
             except subprocess.TimeoutExpired:
-                request = None
+                continue
         if cancelled():
             raise EngineError("cancelled")
         if time.monotonic() >= deadline:

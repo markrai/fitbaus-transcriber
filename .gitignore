@@ -5,3 +5,7 @@ __pycache__/
 *.py[cod]
 .venv/
 data/
+
+backups/
+.fitbaus-stage.*/
+.fitbaus-install.lock

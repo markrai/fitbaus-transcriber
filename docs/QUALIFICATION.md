@@ -1,6 +1,6 @@
 # Hardware qualification
 
-The local operator can benchmark Tiny, Base and Small after installation. The service continues to use Tiny exclusively. These measurements are hardware-specific candidates, not guarantees of accuracy, throughput or safety.
+The local operator can benchmark Tiny, Base and Small after installation. The service uses Tiny for uncached live inference, and qualified Base and Small for optional background preparation. Installed or stale optional models are automatically checked using the bundled five-minute synthetic English speech fixture when the service is configured. These measurements are hardware-specific candidates, not guarantees of accuracy, throughput or safety.
 
 ## Commands
 
@@ -21,6 +21,6 @@ Two full-length results with at least 100 words and 120 seconds of cue coverage 
 
 The memory gate requires available memory >= max(model floor, 125% of measured peak RSS) + 128 MiB. Initial engineering floors are Tiny 768 MiB, Base 896 MiB and Small 1536 MiB, excluding the 128 MiB reserve. These are conservative starting estimates, not measured worst-case requirements. Availability is the smaller of host MemAvailable and visible cgroup limit minus working-set estimate (inactive file cache is treated as reclaimable). Linux cgroup v2 and common v1 mount layouts are supported; nested or unusual mounts and other processes can limit accuracy. CPU quota and affinity are reported and used in the fingerprint, not hard CPU admission limits. No memory reservation or independent worker cgroup is created. An OOM remains possible.
 
-Benchmark admission fails when memory cannot be determined. For backward compatibility, existing Tiny production inference is rejected only when known headroom is insufficient. Cached jobs bypass admission. Failure is retryable within the existing attempt budget. Base and Small cannot yet be selected for production inference.
+Benchmark admission fails when memory cannot be determined. For backward compatibility, existing Tiny production inference is rejected only when known headroom is insufficient. Cached jobs bypass admission. Failure is retryable within the existing attempt budget. Base and Small may be selected for background preparation after qualification.
 
-Authenticated GET /v1/qualification returns current resource estimates, per-model records and admission decisions. No network-triggered benchmark is exposed.
+Authenticated GET /v1/qualification returns current resource estimates, per-model records and admission decisions. Automatic state and run progress are reported alongside the records. Paired devices and the loopback operator can retry an optional model via POST /v1/models/{base|small}/qualify; arbitrary sample uploads are not supported.

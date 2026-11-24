@@ -244,6 +244,19 @@ class Audiobookshelf:
         except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
             raise SourceError("invalid_login_response") from None
 
+    def check_access(self, token):
+        with self._get("/api/libraries", token) as response:
+            if response.headers.get_content_type() != "application/json":
+                raise SourceError("invalid_response")
+            data = b"".join(self._chunks(response, MAX_METADATA_BYTES, time.monotonic() + 30))
+        try:
+            libraries = json.loads(data)["libraries"]
+            if not isinstance(libraries, list) or any(not isinstance(row, dict) for row in libraries):
+                raise ValueError
+            return sum(row.get("mediaType") == "book" for row in libraries)
+        except (ValueError, TypeError, KeyError, RecursionError):
+            raise SourceError("invalid_response") from None
+
     def manifest(self, item_id, token):
         identifier(item_id)
         with self._get(f"/api/items/{item_id}?expanded=1", token) as response:

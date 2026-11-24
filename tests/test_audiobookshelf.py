@@ -68,6 +68,8 @@ class UpstreamHandler(BaseHTTPRequestHandler):
             self.send_header("Location", server.redirect)
             self.end_headers()
             return
+        if self.path == "/audiobookshelf/api/libraries":
+            return self.reply(200, json.dumps({"libraries": [{"mediaType": "book"}, {"mediaType": "podcast"}]}).encode())
         if self.path == "/audiobookshelf/api/items/book-1?expanded=1":
             return self.reply(200, json.dumps(server.payload).encode())
         if self.path == "/audiobookshelf/api/items/book-1/file/123":
@@ -167,6 +169,14 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(self.request(OPERATOR, "denied")[0], 403)
         self.assertEqual(len(self.upstream.requests), 3)
         self.assertNotIn(USER, json.dumps(manifest))
+
+    def test_source_access_check_counts_only_book_libraries(self):
+        self.assertEqual(self.adapter.check_access(USER), 1)
+        with self.assertRaisesRegex(SourceError, "forbidden"):
+            self.adapter.check_access("denied")
+        self.upstream.redirect = self.source.base_url + "/other"
+        with self.assertRaisesRegex(SourceError, "upstream_error"):
+            self.adapter.check_access(USER)
 
     def test_username_password_login_and_legacy_token(self):
         token = self.adapter.login("reader", "test-password")
