@@ -6,7 +6,7 @@ FitBaus audiobook playback does not require this service. Transcription is an op
 
 ## Development status
 
-The foundation, Audiobookshelf source adapter, and CPU speech recognition engine are under development. An operator can now transcribe a bounded audiobook window locally using the CLI. The service does **not** yet offer queued jobs, persistent transcript caching or HTTP transcript serving. No published production image is available.
+The foundation, Audiobookshelf source adapter, and CPU speech recognition engine are under development. An operator can now transcribe a bounded audiobook window locally using the CLI. The operator CLI now supports durable job submission, execution and persistent transcript caching. The service does **not** yet offer HTTP transcription jobs or transcript serving. No published production image is available.
 
 ## Run the foundation locally
 
@@ -79,7 +79,33 @@ Optional environment settings:
 | TRANSCRIBER_LANGUAGE | auto | Detect language or set a lowercase two-letter code such as en |
 | TRANSCRIBER_DECODE_TIMEOUT | 120 | FFmpeg timeout per track slice, in seconds (10–600) |
 
-This slice targets Linux containers with a seekable local audio file, FFmpeg and CPU wheels. It is intended for one operator-run qualification at a time. There is no durable queue, inference deadline, aggregate concurrent-job budget or cached result yet. Do not run multiple CLI jobs concurrently on a resource-constrained host. The default model is deliberately small for an initial CPU baseline; accuracy and throughput need measurement on the actual server before selecting production profiles.
+This slice targets Linux containers with a seekable local audio file, FFmpeg and CPU wheels. Only one inference worker is admitted per shared data directory. The job runner does not yet enforce a hard inference deadline. The default model is deliberately small for an initial CPU baseline; accuracy and throughput need measurement on the actual server before selecting production profiles.
+
+## Durable jobs and cache
+
+The existing `transcribe` command now submits an idempotent job, runs it, and returns its transcript. Repeating the same authorized request reuses the cached result if available.
+
+For separate submission and execution:
+
+```sh
+docker compose run --rm --no-deps transcriber submit --item-id YOUR_BOOK_ID --start-ms 0 --end-ms 60000
+docker compose run --rm --no-deps transcriber run-job --job-id YOUR_JOB_ID
+docker compose run --rm --no-deps transcriber read-job --job-id YOUR_JOB_ID
+```
+
+Each command prompts for an Audiobookshelf credential (or accepts `--token-stdin`). The queue stores job identities, state, attempt counts and results in SQLite under the persistent data volume. It never persists upstream credentials. Access and revision are checked before execution and before returning any cached transcript. Changing the engine profile, language, audio revision or window produces a different job ID.
+
+An exclusive Linux file lock prevents concurrent inference against the same data directory. On acquiring the worker lock, interrupted running jobs are recovered as queued unless their three-attempt budget is exhausted. Resume explicitly using `run-job` with a fresh credential; the queue does not automatically execute jobs after restart. A failed job can be retried up to three total attempts.
+
+| Variable | Default |
+| --- | --- |
+| TRANSCRIBER_MAX_JOBS | 512 |
+| TRANSCRIBER_MAX_ACTIVE_JOBS | 64 |
+| TRANSCRIBER_CACHE_MIB | 128 |
+
+Completed and failed jobs are evicted by recency when admission or result storage reaches its limits. Queued and running jobs are never evicted. Each result is capped at 1 MiB. The cache limit counts serialized transcript payloads; SQLite metadata, transaction journal, model files and temporary audio are additional disk usage. SQLite retains allocated pages for reuse after eviction. Use the same queue limits for all invocations sharing the data directory. Do not run this experimental queue on a network filesystem without reliable Linux file locking.
+
+No background dispatcher, HTTP job interface, cancellation or automatic credential renewal is provided yet. This slice is for operator qualification and the upcoming asynchronous API.
 
 ## API
 
@@ -90,7 +116,7 @@ This slice targets Linux containers with a seekable local audio file, FFmpeg and
 | GET /v1/capabilities | Bearer token | Version, source ID and available functionality |
 | GET /v1/items/{item_id}/manifest | Both credentials | Authorized audio identity and timeline |
 
-See [the transcript contract](docs/TRANSCRIPT-CONTRACT.md). The transcriber token is not an Audiobookshelf user credential. No HTTP transcript access is enabled until the queue and authorization-preserving cache API are implemented. The capability response reports model file presence separately from API readiness.
+See [the transcript contract](docs/TRANSCRIPT-CONTRACT.md). The transcriber token is not an Audiobookshelf user credential. No HTTP transcript access is enabled until the authorization-preserving job API is implemented. The capability response reports model file presence separately from API readiness.
 
 ## Development
 
@@ -102,7 +128,7 @@ python -m unittest discover -s tests -v
 
 1. Headless service foundation, deployment and transcript contract.
 2. Audiobookshelf source authorization, audio identity and bounded audio ingestion.
-3. CPU speech recognition engine (implemented); durable queue, incremental transcript generation and revision-aware cache (next).
+3. CPU speech recognition engine and durable revision/profile-aware job cache (implemented); asynchronous incremental transcript API (next).
 4. Versioned transcript window API, container images and streamlined self-hosting documentation.
 5. Optional FitBaus connection and on-demand Read Along.
 6. GPU acceleration and optional remote workers.
