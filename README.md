@@ -44,7 +44,7 @@ Pin an image digest (`ghcr.io/markrai/fitbaus-transcriber@sha256:...`) for conte
 | Base | Optional, not bundled | Candidate for live use after hardware qualification |
 | Small | Optional, not bundled | Background recommended |
 
-Only Tiny is executable in this phase. The authenticated capabilities response advertises the pinned model inventory and download progress. Optional model downloads are managed by the local server operator; model activation, remote administration and background job control are later phases. Hardware qualification is available through the local CLI. Medium and Large-v3 are not supported. Tiny retains its previous engine ID and language profile so existing cached transcripts remain compatible. Model weights are from [Systran's Faster-Whisper Tiny](https://huggingface.co/Systran/faster-whisper-tiny/tree/d90ca5fe260221311c53c58e660288d3deb8d356), a conversion of OpenAI Whisper under the MIT license. The corresponding [license notice](licenses/whisper-MIT.txt) is included in the image.
+Only Tiny is executable in this phase. The authenticated capabilities response advertises the pinned model inventory and download progress. Optional model downloads are managed by the local server operator; live model activation, remote administration and prepared-transcript playback are later phases. Qualified models can be selected for background jobs. Hardware qualification is available through the local CLI. Medium and Large-v3 are not supported. Tiny retains its previous engine ID and language profile so existing cached transcripts remain compatible. Model weights are from [Systran's Faster-Whisper Tiny](https://huggingface.co/Systran/faster-whisper-tiny/tree/d90ca5fe260221311c53c58e660288d3deb8d356), a conversion of OpenAI Whisper under the MIT license. The corresponding [license notice](licenses/whisper-MIT.txt) is included in the image.
 
 ### Manage optional models
 
@@ -70,7 +70,17 @@ docker compose exec -T transcriber python -m transcriber benchmark --model all -
 docker compose exec -T transcriber python -m transcriber qualification
 ```
 
-See [hardware qualification](docs/QUALIFICATION.md) for the timing and memory admission policy. The benchmark shares the exclusive inference lock with playback, and should not be run during a workout. Tiny remains the only production inference model.
+See [hardware qualification](docs/QUALIFICATION.md) for the timing and memory admission policy. The benchmark shares the exclusive inference lock with playback, and should not be run during a workout. Tiny remains the default and only live inference model; qualified optional models can run background jobs.
+
+### Prepare an audiobook in the background
+
+```sh
+docker compose exec transcriber python -m transcriber background-start --item-id BOOK_ID --model small
+docker compose exec transcriber python -m transcriber background-status --job-id JOB_ID
+docker compose exec transcriber python -m transcriber background-resume --job-id JOB_ID
+```
+
+Supply the Audiobookshelf user's access token or API key at the hidden prompt. Each job can process a whole book or start at an aligned five-minute offset using `--start-ms`. Live Read Along takes priority and can preempt background work. Completed windows and progress are stored together in a separate bounded staging database; these results are not yet used by Read Along. A restart or expired in-memory credential requires an explicit resume. Use `background-list --item-id BOOK_ID`, `background-pause`, `background-cancel` or `background-discard` as needed. See [background job API](docs/BACKGROUND-JOBS.md).
 
 ## Publishing releases
 
