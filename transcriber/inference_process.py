@@ -112,6 +112,7 @@ def supervise(payload, timeout, cancelled, lock_fd, command=None, spawn=subproce
 def supervised_window(source, identity, token, directory, engine, start_ms, end_ms, cancelled, lock_fd):
     payload = {"source": asdict(source.config), "identity": asdict(identity), "token": token,
                "directory": str(directory), "engine": asdict(engine.config),
+               "model": getattr(engine, "model_name", "tiny"),
                "start_ms": start_ms, "end_ms": end_ms}
     return supervise(payload, engine.config.inference_timeout, cancelled, lock_fd)
 
@@ -142,7 +143,8 @@ def worker(parent):
     try:
         source = Audiobookshelf(SourceConfig(**request["source"]))
         identity = AudioIdentity(**request["identity"])
-        engine = WhisperCpuEngine(Path(request["directory"]), EngineConfig(**request["engine"]))
+        engine = WhisperCpuEngine(Path(request["directory"]), EngineConfig(**request["engine"]),
+                                  model_name=request.get("model", "tiny"))
         window = transcribe_window(source, identity, request["token"], Path(request["directory"]),
                                    engine, request["start_ms"], request["end_ms"])
         result = json.dumps(window.to_json(), ensure_ascii=True, separators=(",", ":"))
