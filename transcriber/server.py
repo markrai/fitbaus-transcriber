@@ -11,7 +11,7 @@ from .audiobookshelf import Audiobookshelf, SourceError, valid_bearer
 
 from .contract import AudioIdentity, SCHEMA, MAX_WINDOW_MS
 from .dispatcher import Dispatcher
-from .background import Background, BackgroundStore
+from .background import Background, BackgroundStore, PreparedSpec
 from .jobs import JobStore, QueueError, MAX_ATTEMPTS
 from .runner import JobRunner
 from .engine import ENGINE_ID, WhisperCpuEngine
@@ -46,7 +46,9 @@ class Service(ThreadingHTTPServer):
                 if str(error) != "worker_busy":
                     super().server_close()
                     raise
-            self.background = Background(self.runner, BackgroundStore(config.data_dir / "background"))
+            prepared = BackgroundStore(config.data_dir / "background")
+            self.runner.prepared = prepared
+            self.background = Background(self.runner, prepared)
             self.dispatcher = Dispatcher(self.runner, config.queue.max_active, background=self.background)
 
     def readiness(self):
@@ -173,6 +175,7 @@ class Handler(BaseHTTPRequestHandler):
                 "model_quota_mib": self.server.config.model_quota_mib,
                 "job_api": True,
                 "background_job_api": True,
+                "prepared_transcripts": True,
                 "running_job_cancel": True,
                 "inference_timeout_seconds": self.server.config.engine.inference_timeout,
                 "pairing_api": True,
@@ -332,6 +335,7 @@ class Handler(BaseHTTPRequestHandler):
             "item_id": spec.identity.item_id, "audio_revision": spec.identity.audio_revision,
             "start_ms": spec.start_ms, "end_ms": spec.end_ms, "profile": spec.profile,
             "state": job.state, "dispatch": self.server.dispatcher.dispatch_state(job),
+            "prepared": isinstance(spec, PreparedSpec),
             "attempts": job.attempts, "max_attempts": MAX_ATTEMPTS, "error": job.error,
         }
 
