@@ -112,7 +112,9 @@ class IntegrationTests(unittest.TestCase):
         self.upstream_thread.start()
         self.source = SourceConfig("home", f"http://127.0.0.1:{self.upstream.server_port}/audiobookshelf")
         self.adapter = Audiobookshelf(self.source)
-        self.service = Service(("127.0.0.1", 0), Config(OPERATOR, "127.0.0.1", 8765, Path("/data"), self.source))
+        data = tempfile.TemporaryDirectory()
+        self.addCleanup(data.cleanup)
+        self.service = Service(("127.0.0.1", 0), Config(OPERATOR, "127.0.0.1", 8765, Path(data.name), self.source))
         self.service_thread = threading.Thread(target=self.service.serve_forever, daemon=True)
         self.service_thread.start()
 
