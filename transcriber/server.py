@@ -3,6 +3,9 @@ import hmac
 import json
 import threading
 import re
+import sqlite3
+
+from .pairing import Pairing, TTL_SECONDS
 
 from .audiobookshelf import Audiobookshelf, SourceError, valid_bearer
 
@@ -20,6 +23,7 @@ class Service(ThreadingHTTPServer):
 
     def __init__(self, address, config, runner=None, model_available=None):
         self.config = config
+        self.pairing = Pairing(config.data_dir)
         self.source = Audiobookshelf(config.source) if config.source else None
         self.slots = threading.BoundedSemaphore(8)
         self.model_available = model_available or (lambda: model_present(model_directory(config.data_dir)))
@@ -96,13 +100,48 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
         self.close_connection = True
 
-    def _authorized(self):
+    def _operator_authorized(self):
         values = self.headers.get_all("Authorization") or []
         if len(values) != 1:
             return False
         supplied = values[0].encode("utf-8")
         expected = ("Bearer " + self.server.config.token).encode("utf-8")
         return hmac.compare_digest(supplied, expected)
+
+    def _authorized(self):
+        if self._operator_authorized():
+            return True
+        values = self.headers.get_all("Authorization") or []
+        if len(values) != 1 or not values[0].startswith("Bearer "):
+            return False
+        try:
+            return self.server.pairing.authorized(values[0][7:])
+        except (OSError, sqlite3.Error):
+            return False
+
+    def _pairing_request(self):
+        if self.path in ("/v1/pairing/issue", "/v1/pairing/revoke-all"):
+            if self.client_address[0] not in ("127.0.0.1", "::1") or not self._operator_authorized():
+                return self._json(401, {"error": "unauthorized"})
+            if self.path.endswith("/issue"):
+                return self._json(200, {"code": self.server.pairing.issue(), "expires_in": TTL_SECONDS})
+            try:
+                self.server.pairing.revoke_all()
+                return self._json(200, {"revoked": True})
+            except (OSError, sqlite3.Error):
+                return self._json(503, {"error": "pairing_storage_error"})
+        try:
+            body = self._body()
+            if not isinstance(body, dict) or set(body) != {"code"} or not isinstance(body["code"], str):
+                raise ValueError("invalid_request")
+            status, result = self.server.pairing.redeem(body["code"])
+            return self._json(status, result)
+        except TimeoutError:
+            return self._json(408, {"error": "request_timeout"})
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            return self._json(400, {"error": "invalid_request"})
+        except (OSError, sqlite3.Error):
+            return self._json(503, {"error": "pairing_storage_error"})
 
     def do_GET(self):
         if self.path == "/healthz":
@@ -121,6 +160,7 @@ class Handler(BaseHTTPRequestHandler):
                 "engine_id": ENGINE_ID,
                 "model_present": self.server.model_available(),
                 "job_api": True,
+                "pairing_api": True,
                 "max_window_ms": MAX_WINDOW_MS,
                 "source_configured": self.server.source is not None,
                 "source_id": self.server.config.source.source_id if self.server.config.source else None,
@@ -134,6 +174,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(404, {"error": "not_found"})
 
     def do_POST(self):
+        if self.path in ("/v1/pairing/issue", "/v1/pairing/redeem", "/v1/pairing/revoke-all"):
+            return self._pairing_request()
         if not self._authorized():
             return self._json(401, {"error": "unauthorized"})
         if self.path != "/v1/jobs":
