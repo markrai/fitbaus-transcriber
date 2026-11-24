@@ -17,8 +17,7 @@ POLL_SECONDS = 0.1
 TERMINATION_GRACE = 2
 SOURCE_ERRORS = frozenset(("unauthorized", "forbidden", "not_found", "stale_revision",
                            "source_failed", "upstream_unavailable", "invalid_manifest",
-                           "invalid_audio", "track_too_large", "source_unavailable", "invalid_source_response",
-                           "audio_too_large", "audio_transfer_timeout", "audio_size_mismatch"))
+                           "invalid_response", "transfer_timeout", "size_limit", "incomplete_audio"))
 
 
 def terminate_group(process):
