@@ -2,6 +2,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from transcriber.audiobookshelf import SourceError
 from transcriber.contract import AudioIdentity, Cue, TranscriptWindow
@@ -88,6 +89,21 @@ class JobTests(unittest.TestCase):
         with self.assertRaisesRegex(SourceError, "stale_revision"):
             self.runner.result(job.spec.id, "authorized")
         self.assertNotEqual(self.submit().spec.id, job.spec.id)
+
+    def test_resource_gate_rejects_uncached_work_but_preserves_cache_hits(self):
+        from transcriber.engine import EngineError
+        from transcriber.resources import Resources
+        cached = self.submit()
+        self.runner.run(cached.spec.id, "authorized")
+        blocked = self.submit(1000, 2000)
+        runner = JobRunner(self.store, self.source, self.engine, self.path)
+        low = Resources(100, 90, 10, 2, 2, "x86_64", "test")
+        with patch("transcriber.runner.snapshot", return_value=low), patch("transcriber.runner.supervised_window") as spawn:
+            self.assertEqual(runner.run(cached.spec.id, "authorized").state, "ready")
+            with self.assertRaisesRegex(EngineError, "resource_unavailable"):
+                runner.run(blocked.spec.id, "authorized")
+            spawn.assert_not_called()
+        self.assertEqual(self.store.get(blocked.spec.id).error, "resource_unavailable")
 
     def test_profile_part_of_identity(self):
         job = self.submit()
