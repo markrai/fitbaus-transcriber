@@ -53,7 +53,7 @@ Backups contain operator credentials, pairing credential hashes and private tran
 
 ## Existing source or manually configured deployments
 
-The installer deliberately refuses to adopt existing configurations automatically. Continue using the current Compose project and deployment method. To migrate to a published image, back up the existing volume and configuration, retain the same project and volume, use the release Compose file and set the published image reference. Do not run the source-built and release services concurrently. The managed installer is intended for fresh installs; automatic adoption, Portainer and NAS-specific workflows are not part of this phase.
+The installer deliberately refuses to adopt existing configurations automatically. Continue using the current Compose project and deployment method. To migrate to a published image, back up the existing volume and configuration, retain the same project and volume, use the release Compose file and set the published image reference. Do not run the source-built and release services concurrently. The managed installer is intended for fresh installs; automatic adoption is not supported. For a fresh GUI-managed deployment, see [Portainer and NAS deployment](NAS-DEPLOYMENT.md).
 
 ## Troubleshooting
 
