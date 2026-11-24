@@ -360,7 +360,7 @@ class Handler(BaseHTTPRequestHandler):
             "worker_unavailable": 503, "queue_storage_error": 503,
             "background_not_found": 404, "background_full": 429, "background_storage_full": 409,
             "background_not_discardable": 409, "background_busy": 409,
-            "background_storage_error": 503, "model_not_prepared": 409,
+            "background_storage_error": 503, "background_disk_full": 409, "model_not_prepared": 409,
             "model_not_qualified": 409, "resource_unavailable": 503,
         }
         return self._json(statuses.get(code, 502), {"error": code})
