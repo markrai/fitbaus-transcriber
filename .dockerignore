@@ -3,6 +3,8 @@
 !LICENSE
 !licenses/
 !licenses/whisper-MIT.txt
+!scripts/
+!scripts/build-qualification-sample.py
 !transcriber/
 !transcriber/**
 **/__pycache__
