@@ -340,14 +340,18 @@ class Background:
 
     def action(self, job_id, token, action, *, refresh=None, guard=None):
         job = self.store.get(job_id)
-        self.authorize(job, token, exact=action == "resume")
+        self.authorize(job, token, exact=action in ("resume", "reauthorize"))
         if action == "resume" and job.state not in ("completed", "cancelled"):
             self.check_model(job.model, require_memory=False)
         with self.lock:
             if self.closed:
                 raise QueueError("worker_unavailable")
             job = self.store.get(job_id)
-            if action == "resume":
+            if action == "reauthorize":
+                if job.state == "pending" and job_id not in self.pending and self.current != job_id:
+                    self.check_model(job.model, require_memory=False)
+                    self.grant(job_id, token, None, guard)
+            elif action == "resume":
                 if job.state not in ("completed", "cancelled"):
                     if guard is not None and not guard():
                         raise SourceError("unauthorized")
