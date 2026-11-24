@@ -48,7 +48,7 @@ class Config:
             cpu_threads=int(env.get("TRANSCRIBER_CPU_THREADS", "2")),
             language=None if language == "auto" else language,
             decode_timeout=int(env.get("TRANSCRIBER_DECODE_TIMEOUT", "120")),
-            inference_timeout=int(env.get("TRANSCRIBER_INFERENCE_TIMEOUT", "120")), 
+            inference_timeout=int(env.get("TRANSCRIBER_INFERENCE_TIMEOUT", "120")),
         )
         queue = QueueLimits(
             max_jobs=int(env.get("TRANSCRIBER_MAX_JOBS", "512")),
