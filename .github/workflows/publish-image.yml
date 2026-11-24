@@ -31,8 +31,7 @@ jobs:
             exit 1
           fi
           echo "TRANSCRIBER_IMAGE=$IMAGE:$RELEASE_TAG" >> "$GITHUB_ENV"
-      - name: Test source
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: python -m unittest discover -s tests -v
@@ -47,6 +46,8 @@ jobs:
             --tag "$TRANSCRIBER_IMAGE" .
       - name: Verify exact release image
         run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends espeak-ng
           bash scripts/verify-release-image.sh
       - name: Authenticate to GitHub Container Registry
         env:
@@ -55,6 +56,10 @@ jobs:
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
       - name: Publish version tag
         run: |
+          if docker manifest inspect "$TRANSCRIBER_IMAGE" >/dev/null 2>&1; then
+            echo "Version already published; refusing to overwrite $TRANSCRIBER_IMAGE" >&2
+            exit 1
+          fi
           docker push "$TRANSCRIBER_IMAGE"
           docker image inspect --format '{{join .RepoDigests "\n"}}' "$TRANSCRIBER_IMAGE"
       - name: Sign out
