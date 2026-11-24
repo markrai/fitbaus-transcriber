@@ -1,4 +1,5 @@
 from dataclasses import asdict
+from contextlib import contextmanager
 import ctypes
 import json
 import os
@@ -36,7 +37,7 @@ def terminate_group(process):
     process.wait()
 
 
-def supervise(payload, timeout, cancelled, lock_fd, command=None, spawn=subprocess.Popen):
+def supervise(payload, timeout, cancelled, lock_fd, command=None, spawn=subprocess.Popen, audio_fd=None):
     if cancelled():
         raise EngineError("cancelled")
     command = command or [sys.executable, "-m", "transcriber.inference_process", str(os.getpid())]
@@ -48,7 +49,7 @@ def supervise(payload, timeout, cancelled, lock_fd, command=None, spawn=subproce
     finished = False
     try:
         process = spawn(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                        start_new_session=True, pass_fds=(lock_fd,), env=env)
+                        start_new_session=True, pass_fds=(lock_fd,) if audio_fd is None else (lock_fd, audio_fd), env=env)
         request = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("ascii")
         while True:
             if cancelled():
@@ -109,12 +110,16 @@ def supervise(payload, timeout, cancelled, lock_fd, command=None, spawn=subproce
                 process.stdout.close()
 
 
-def supervised_window(source, identity, token, directory, engine, start_ms, end_ms, cancelled, lock_fd):
+def supervised_window(source, identity, token, directory, engine, start_ms, end_ms, cancelled, lock_fd, spool=None):
     payload = {"source": asdict(source.config), "identity": asdict(identity), "token": token,
                "directory": str(directory), "engine": asdict(engine.config),
                "model": getattr(engine, "model_name", "tiny"),
                "start_ms": start_ms, "end_ms": end_ms}
-    return supervise(payload, engine.config.inference_timeout, cancelled, lock_fd)
+    audio_fd = None
+    if spool is not None:
+        audio_fd, file_id, ready = spool
+        payload["spool"] = {"fd": audio_fd, "file_id": file_id, "ready": ready}
+    return supervise(payload, engine.config.inference_timeout, cancelled, lock_fd, audio_fd=audio_fd)
 
 
 def parent_death_guard(parent):
@@ -130,6 +135,32 @@ def parent_death_guard(parent):
         on_parent_death(None, None)
 
 
+class SpoolSource(Audiobookshelf):
+    def __init__(self, config, spool):
+        super().__init__(config)
+        self.spool = spool
+
+    @contextmanager
+    def materialize_track(self, identity, file_id, token, directory):
+        if file_id != self.spool["file_id"]:
+            with super().materialize_track(identity, file_id, token, directory) as target:
+                yield target
+            return
+        with os.fdopen(os.dup(self.spool["fd"]), "r+b") as target:
+            if self.spool["ready"]:
+                current = self.manifest(identity.item_id, token)
+                if current.identity != identity:
+                    raise SourceError("stale_revision")
+                track = next((t for t in current.tracks if t.file_id == file_id), None)
+                if track is None or os.fstat(target.fileno()).st_size != track.size:
+                    raise SourceError("incomplete_audio")
+                target.seek(0)
+                yield target
+            else:
+                with super().materialize_track(identity, file_id, token, directory, target=target) as audio:
+                    yield audio
+
+
 def worker(parent):
     parent_death_guard(parent)
     raw = sys.stdin.buffer.read(32769)
@@ -141,7 +172,8 @@ def worker(parent):
     output = sys.stdout
     sys.stdout = sys.stderr
     try:
-        source = Audiobookshelf(SourceConfig(**request["source"]))
+        source_config = SourceConfig(**request["source"])
+        source = SpoolSource(source_config, request["spool"]) if "spool" in request else Audiobookshelf(source_config)
         identity = AudioIdentity(**request["identity"])
         engine = WhisperCpuEngine(Path(request["directory"]), EngineConfig(**request["engine"]),
                                   model_name=request.get("model", "tiny"))
