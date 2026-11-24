@@ -209,7 +209,7 @@ class JobStore:
 
     def fail(self, job_id, error):
         if error not in ("source_failed", "engine_failed", "result_limit", "internal_error",
-                         "inference_timeout", "worker_crashed", "cancelled", "worker_unavailable", "invalid_worker_result"):
+                         "inference_timeout", "worker_crashed", "cancelled", "worker_unavailable", "invalid_worker_result", "resource_unavailable"):
             raise ValueError("Invalid failure classification")
         with self._transaction() as db:
             db.execute("UPDATE jobs SET state='failed',error=?,touched=? WHERE id=? AND state='running'",
