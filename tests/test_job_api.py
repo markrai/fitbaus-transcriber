@@ -140,7 +140,6 @@ class ApiTests(unittest.TestCase):
 
     def test_paired_background_refresh_and_revocation(self):
         self.server.background.check_model = lambda *args, **kwargs: None
-        self.server.background.check_model = lambda *args, **kwargs: None
         entered = threading.Event()
         def execute(source, identity, token, directory, engine, start, end, cancelled, fd):
             entered.set()
@@ -177,6 +176,32 @@ class ApiTests(unittest.TestCase):
         self.assertFalse(current["authorization_active"])
         self.assertEqual(current["processed_ms"], 0)
         self.assertEqual(self.request("GET", route, operator=redeemed["token"])[0], 401)
+        entered.clear()
+        _, second = self.server.pairing.redeem(self.server.pairing.issue())
+        self.assertEqual(self.request("POST", route + "/resume", operator=second["token"], extra_headers=headers)[0], 202)
+        self.assertTrue(entered.wait(3))
+        self.assertEqual(self.request("POST", "/v1/pairing/revoke-all")[0], 200)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            _, current = self.request("GET", route)
+            if current["state"] == "waiting_credentials":
+                break
+            time.sleep(0.02)
+        self.assertEqual(current["state"], "waiting_credentials")
+        self.assertFalse(current["authorization_active"])
+        self.assertEqual(current["processed_ms"], 0)
+
+    def test_qualification_retry_requires_pairing_or_local_operator(self):
+        calls = []
+        self.server.qualification.retry = lambda name: (calls.append(name) or True)
+        route = "/v1/models/base/qualify"
+        self.assertEqual(self.request("POST", route, operator=None)[0], 401)
+        self.assertEqual(self.request("POST", route, operator="invalid")[0], 401)
+        _, device = self.server.pairing.redeem(self.server.pairing.issue())
+        self.assertEqual(self.request("POST", route, operator=device["token"])[0], 202)
+        self.assertEqual(self.request("POST", "/v1/models/small/qualify")[0], 202)
+        self.assertEqual(self.request("POST", "/v1/models/tiny/qualify")[0], 404)
+        self.assertEqual(calls, ["base", "small"])
 
     def test_prepared_window_uses_actual_profile_without_live_inference(self):
         prepared = self.server.background.store
