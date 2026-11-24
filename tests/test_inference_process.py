@@ -39,6 +39,12 @@ print(json.dumps({"window": {"schema": "fitbaus.transcript/v1", **p["identity"],
         with self.assertRaisesRegex(EngineError, "invalid_worker_result"):
             self.run_code(self.valid_code().replace('**p["identity"]', '**{**p["identity"], "item_id": "other"}'))
 
+    def test_large_request_with_delayed_reader(self):
+        self.payload["token"] = "x" * 8192
+        code = "import time; time.sleep(0.25)\n" + self.valid_code().replace(
+            "p = json.load(sys.stdin)", 'p = json.load(sys.stdin)\nassert p["token"] == "x" * 8192')
+        self.assertEqual(self.run_code(code).cues[0].text, "Narration")
+
     def test_timeout_then_next_window_succeeds(self):
         with self.assertRaisesRegex(EngineError, "inference_timeout"):
             self.run_code("import time; time.sleep(60)", timeout=0.2)
