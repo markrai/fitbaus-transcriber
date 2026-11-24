@@ -3,6 +3,7 @@ import getpass
 import json
 import sys
 import tempfile
+import http.client
 
 from .audiobookshelf import Audiobookshelf, SourceError, valid_bearer
 from .config import Config
@@ -18,6 +19,8 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("serve")
     commands.add_parser("prepare-model")
+    commands.add_parser("pair")
+    commands.add_parser("revoke-pairings")
     discard = commands.add_parser("discard-job")
     discard.add_argument("--job-id", required=True)
     for name in ("transcribe", "submit"):
@@ -36,7 +39,23 @@ def main(argv=None):
         config.data_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryFile(dir=config.data_dir):
             pass
-        if args.command == "prepare-model":
+        if args.command in ("pair", "revoke-pairings"):
+            path = "/v1/pairing/issue" if args.command == "pair" else "/v1/pairing/revoke-all"
+            client = http.client.HTTPConnection("127.0.0.1", config.port, timeout=5)
+            try:
+                client.request("POST", path, headers={"Authorization": "Bearer " + config.token})
+                response = client.getresponse()
+                if response.status != 200:
+                    raise ValueError("Pairing management failed")
+                result = json.loads(response.read(4096))
+                if args.command == "pair":
+                    print(result["code"])
+                    print("Valid for 10 minutes; single use. Keep private.", file=sys.stderr)
+                else:
+                    print("All paired device credentials revoked.")
+            finally:
+                client.close()
+        elif args.command == "prepare-model":
             prepare_model(config.data_dir)
             print("Whisper CPU model prepared", file=sys.stderr)
         elif args.command == "discard-job":
