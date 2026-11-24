@@ -15,8 +15,7 @@ Requirements: Docker and Docker Compose, or Python 3.12 for development.
 ```sh
 git clone https://github.com/markrai/fitbaus-transcriber.git
 cd fitbaus-transcriber
-umask 077
-printf 'TRANSCRIBER_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
+(umask 077; printf 'TRANSCRIBER_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env)
 docker compose up --build -d
 curl http://127.0.0.1:8765/healthz
 ```
@@ -34,6 +33,17 @@ unset TRANSCRIBER_TOKEN
 Keep `.env` private. Environment variables are visible to Docker administrators. The process also supports `TRANSCRIBER_TOKEN_FILE` instead of `TRANSCRIBER_TOKEN` for file-based secret management. The Compose example uses the environment variable.
 
 The container runs as a non-root user, with a read-only root filesystem and persistent data volume. The CPU profile defaults to two CPU threads, a two-core CPU quota and a 2 GiB memory limit. These are initial configuration defaults, not measured minimum requirements.
+
+## Update an existing deployment
+
+From your cloned repository:
+
+```sh
+git pull --ff-only
+./deploy.sh
+```
+
+The deployment script builds the current checkout, recreates the service if needed, waits for Docker health, and reports transcription readiness separately. It retains the existing Compose data volume and does not change `.env`, download the model again, or pull Git changes automatically. A healthy service without a configured source or prepared model reports a readiness warning. A failed build or unhealthy container exits unsuccessfully. Run `bash deploy.sh` if your checkout does not preserve executable permissions.
 
 ## Configure Audiobookshelf
 
