@@ -42,6 +42,18 @@ class UpstreamHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST(self):
+        self.server.login_requests.append(self.path)
+        if self.server.redirect:
+            self.send_response(307)
+            self.send_header("Location", self.server.redirect)
+            self.end_headers()
+            return
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.path != "/audiobookshelf/login" or body != {"username": "reader", "password": "test-password"}:
+            return self.reply(401, b"rejected")
+        return self.reply(200, json.dumps(self.server.login_response).encode())
+
     def do_GET(self):
         server = self.server
         server.requests.append((self.path, self.headers.get("Authorization")))
@@ -105,6 +117,8 @@ class IntegrationTests(unittest.TestCase):
         self.upstream = ThreadingHTTPServer(("127.0.0.1", 0), UpstreamHandler)
         self.upstream.payload = fixture()
         self.upstream.requests = []
+        self.upstream.login_requests = []
+        self.upstream.login_response = {"user": {"accessToken": USER, "token": "legacy"}}
         self.upstream.redirect = None
         self.upstream.audio = AUDIO
         self.upstream.change_after_audio = False
@@ -149,6 +163,25 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(self.request(OPERATOR, "denied")[0], 403)
         self.assertEqual(len(self.upstream.requests), 3)
         self.assertNotIn(USER, json.dumps(manifest))
+
+    def test_username_password_login_and_legacy_token(self):
+        token = self.adapter.login("reader", "test-password")
+        self.assertEqual(token, USER)
+        self.assertEqual(self.adapter.manifest("book-1", token).duration_ms, 30125)
+        self.upstream.login_response = {"user": {"token": USER}}
+        self.assertEqual(self.adapter.login("reader", "test-password"), USER)
+        self.upstream.login_response = {"user": {"accessToken": "invalid token", "token": USER}}
+        with self.assertRaisesRegex(SourceError, "invalid_login_response"):
+            self.adapter.login("reader", "test-password")
+        with self.assertRaisesRegex(SourceError, "login_rejected"):
+            self.adapter.login("reader", "wrong")
+        self.assertEqual(self.upstream.login_requests, ["/audiobookshelf/login"] * 4)
+
+    def test_login_redirect_never_forwards_credentials(self):
+        self.upstream.redirect = self.source.base_url + "/other"
+        with self.assertRaisesRegex(SourceError, "login_unavailable"):
+            self.adapter.login("reader", "test-password")
+        self.assertEqual(self.upstream.login_requests, ["/audiobookshelf/login"])
 
     def test_redirect_is_not_followed(self):
         self.upstream.redirect = self.source.base_url + "/other"

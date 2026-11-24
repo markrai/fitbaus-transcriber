@@ -6,6 +6,7 @@ import signal
 import tempfile
 import http.client
 import re
+import warnings
 
 from .audiobookshelf import Audiobookshelf, SourceError, valid_bearer, identifier
 from .config import Config
@@ -15,6 +16,40 @@ from .runner import JobRunner
 from .model import MODELS, prepare_model
 from .qualification import MAX_WAV_BYTES, inventory, qualify
 from .server import Service
+
+
+def source_credential(config, token_stdin):
+    if config.source is None:
+        raise ValueError("Audiobookshelf source not configured")
+    if token_stdin:
+        token = sys.stdin.readline(8194).rstrip("\r\n")
+    else:
+        if not sys.stdin.isatty():
+            raise ValueError("Use --token-stdin for noninteractive credentials")
+        print("Audiobookshelf authentication", file=sys.stderr)
+        print("  1) Username and password (default)", file=sys.stderr)
+        print("  2) Access token or API key", file=sys.stderr)
+        choice = input("Choose [1/2]: ").strip()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", getpass.GetPassWarning)
+            if choice in ("", "1"):
+                if config.source.base_url.startswith("http://"):
+                    print("Warning: credentials will travel over unencrypted HTTP to the configured Audiobookshelf server.", file=sys.stderr)
+                    if input("Continue on your trusted private network? [y/N]: ").strip().lower() != "y":
+                        raise ValueError("Login cancelled")
+                username = input("Audiobookshelf username: ").strip()
+                password = getpass.getpass("Audiobookshelf password: ")
+                try:
+                    token = Audiobookshelf(config.source).login(username, password)
+                finally:
+                    del password
+            elif choice == "2":
+                token = getpass.getpass("Audiobookshelf access token or API key: ")
+            else:
+                raise ValueError("Invalid authentication choice")
+    if not valid_bearer(token):
+        raise ValueError("Invalid Audiobookshelf credential")
+    return token
 
 
 def main(argv=None):
@@ -106,12 +141,7 @@ def main(argv=None):
             if any(r["state"] in ("failed", "not_installed", "insufficient_memory") for r in results):
                 return 1
         elif args.command and args.command.startswith("background-"):
-            if not args.token_stdin and not sys.stdin.isatty():
-                raise ValueError("Use --token-stdin for noninteractive credentials")
-            token = (sys.stdin.readline(8194).rstrip("\r\n") if args.token_stdin
-                     else getpass.getpass("Audiobookshelf access token or API key: "))
-            if not valid_bearer(token):
-                raise ValueError("Invalid Audiobookshelf credential")
+            token = source_credential(config, args.token_stdin)
             headers = {"Authorization": "Bearer " + config.token, "X-Audiobookshelf-Token": token}
             def request(method, route, body=None):
                 conn = http.client.HTTPConnection("127.0.0.1", config.port, timeout=60)
@@ -154,12 +184,7 @@ def main(argv=None):
         elif args.command in ("transcribe", "submit", "run-job", "read-job"):
             if config.source is None:
                 raise ValueError("Audiobookshelf source not configured")
-            if not args.token_stdin and not sys.stdin.isatty():
-                raise ValueError("Use --token-stdin for noninteractive credentials")
-            token = (sys.stdin.readline(8194).rstrip("\r\n") if args.token_stdin
-                     else getpass.getpass("Audiobookshelf access token or API key: "))
-            if not valid_bearer(token):
-                raise ValueError("Invalid Audiobookshelf credential")
+            token = source_credential(config, args.token_stdin)
             source = Audiobookshelf(config.source)
             engine = WhisperCpuEngine(config.data_dir, config.engine)
             store = JobStore(config.data_dir / "queue", config.queue)
@@ -191,6 +216,9 @@ def main(argv=None):
                     signal.signal(signal.SIGTERM, previous)
     except (SourceError, EngineError, QueueError) as error:
         print("Transcription failed: " + str(error), file=sys.stderr)
+        return 1
+    except (EOFError, KeyboardInterrupt, getpass.GetPassWarning):
+        print("Credential entry cancelled or hidden input unavailable", file=sys.stderr)
         return 1
     except (ValueError, OSError, RuntimeError):
         print("Operation failed: check configuration, model, source and data directory", file=sys.stderr)
