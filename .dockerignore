@@ -1,0 +1,5 @@
+*
+!transcriber/
+!transcriber/**
+**/__pycache__
+**/*.pyc
