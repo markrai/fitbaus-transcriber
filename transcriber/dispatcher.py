@@ -24,6 +24,8 @@ class Dispatcher:
         self.thread.start()
 
     def _expire(self):
+        if self.background is not None:
+            self.background.expire()
         now = self.clock()
         for job_id, (_, deadline) in list(self.pending.items()):
             if deadline <= now:
