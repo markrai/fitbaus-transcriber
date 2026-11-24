@@ -11,6 +11,8 @@ from transcriber.audiobookshelf import SourceConfig
 from transcriber.config import Config
 from transcriber.engine import EngineConfig
 from transcriber.server import Service
+from transcriber.qualification import AUTOMATIC_SAMPLE, AUTOMATIC_SAMPLE_KIND, qualify
+from transcriber.runner import RunControl
 
 
 OPERATOR = "test-only-operator-" + "a" * 32
@@ -122,6 +124,14 @@ def main():
         assert request("POST", route + "/discard")[0] == 200
         assert request("GET", prepared_route)[0] == 404
         print(json.dumps({"background": background, "prepared": prepared}))
+        assert request("GET", "/v1/capabilities")[1]["automatic_model_qualification"] is True
+        with server.runner.store.worker() as fd:
+            qualification = qualify(config.data_dir, "tiny", config.engine, AUTOMATIC_SAMPLE.read_bytes(), fd,
+                                    control=RunControl(), automatic=True)
+        assert qualification["sample_kind"] == AUTOMATIC_SAMPLE_KIND
+        assert qualification["state"] in ("live_candidate", "background_candidate"), qualification
+        assert len(qualification["runs"]) == 2
+        print(json.dumps({"automatic_sample_qualification": qualification}))
     finally:
         server.shutdown()
         server.server_close()
