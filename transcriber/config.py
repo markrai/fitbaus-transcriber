@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 from .audiobookshelf import SourceConfig
+from .engine import EngineConfig
 
 
 @dataclass(frozen=True)
@@ -12,6 +13,7 @@ class Config:
     port: int
     data_dir: Path
     source: SourceConfig | None = None
+    engine: EngineConfig = EngineConfig()
 
     @classmethod
     def from_env(cls, env=None):
@@ -38,4 +40,10 @@ class Config:
         if bool(source_url) != bool(source_id):
             raise ValueError("Configure both Audiobookshelf URL and source ID")
         source = SourceConfig(source_id, source_url) if source_url else None
-        return cls(token, env.get("TRANSCRIBER_BIND", "127.0.0.1"), port, data_dir, source)
+        language = env.get("TRANSCRIBER_LANGUAGE", "auto")
+        engine = EngineConfig(
+            cpu_threads=int(env.get("TRANSCRIBER_CPU_THREADS", "2")),
+            language=None if language == "auto" else language,
+            decode_timeout=int(env.get("TRANSCRIBER_DECODE_TIMEOUT", "120")),
+        )
+        return cls(token, env.get("TRANSCRIBER_BIND", "127.0.0.1"), port, data_dir, source, engine)
