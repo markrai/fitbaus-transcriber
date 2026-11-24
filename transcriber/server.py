@@ -177,6 +177,7 @@ class Handler(BaseHTTPRequestHandler):
                 "background_job_api": True,
                 "prepared_transcripts": True,
                 "unattended_background_local": True,
+                "background_job_lifetime_authorization": True,
                 "running_job_cancel": True,
                 "inference_timeout_seconds": self.server.config.engine.inference_timeout,
                 "pairing_api": True,
@@ -273,11 +274,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             leases = self.headers.get_all("X-FitBaus-Background-Lease") or []
             refreshes = self.headers.get_all("X-FitBaus-Background-Refresh") or []
-            unattended = leases == ["24h"]
             if leases or refreshes:
                 if self.client_address[0] not in ("127.0.0.1", "::1") or not self._operator_authorized():
                     return self._json(401, {"error": "unauthorized"})
-                if action not in ("submit", "resume") or not unattended or len(refreshes) > 1 or (
+                if action not in ("submit", "resume") or leases not in ([], ["24h"]) or len(refreshes) > 1 or (
                         refreshes and not valid_bearer(refreshes[0])):
                     raise ValueError("invalid_request")
             refresh = refreshes[0] if refreshes else None
@@ -288,7 +288,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("invalid_request")
                 identity = AudioIdentity(body["source_id"], body["item_id"], body["audio_revision"])
                 result = background.submit(identity, body["model"], token, body.get("start_ms", 0),
-                                           unattended=unattended, refresh=refresh)
+                                           refresh=refresh)
             elif action == "list":
                 manifest = background.runner.source.manifest(identifier, token)
                 result = {"jobs": [background.status(job) for job in background.store.for_item(
@@ -298,7 +298,7 @@ class Handler(BaseHTTPRequestHandler):
                 background.authorize(job, token, exact=False)
                 result = background.status(job)
             else:
-                result = background.action(identifier, token, action, unattended=unattended, refresh=refresh)
+                result = background.action(identifier, token, action, refresh=refresh)
             self.server.dispatcher.wake()
             return self._json(202 if action in ("submit", "resume") and
                               result.get("state") in ("queued", "processing", "waiting_resources") else 200, result)
