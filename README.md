@@ -6,7 +6,7 @@ FitBaus audiobook playback does not require this service. Transcription is an op
 
 ## Development status
 
-The initial service foundation is under development. This slice provides Docker deployment, configuration, authenticated capability discovery and a versioned transcript contract. It does **not** yet perform speech recognition, connect to Audiobookshelf, or serve transcripts. No published production image is available.
+The service foundation and Audiobookshelf source adapter are under development. The service can authorize a caller against a configured Audiobookshelf instance and resolve a revision-scoped audiobook manifest. It has bounded internal audio ingestion but does **not** yet perform speech recognition or serve transcripts. No published production image is available.
 
 ## Run the foundation locally
 
@@ -35,15 +35,31 @@ Keep `.env` private. Environment variables are visible to Docker administrators.
 
 The container runs as a non-root user, with a read-only root filesystem and persistent data volume. The current CPU and memory limits are for the foundation only; transcription profiles will have independent resource requirements.
 
+## Configure Audiobookshelf
+
+Set these optional variables in `.env`:
+
+```dotenv
+AUDIOBOOKSHELF_URL=http://192.168.1.10:13378
+AUDIOBOOKSHELF_SOURCE_ID=home-library
+```
+
+Use the address reachable from inside the container. A Docker service name on a shared network also works. HTTPS and the standard `/audiobookshelf` subpath are supported. For HTTP, use only a trusted private network. Assign a new source ID if you replace the underlying server with a different library. Restart with `docker compose up -d` after configuration changes.
+
+The transcriber does not store an Audiobookshelf admin key. Each manifest request requires both the transcriber access token and the caller's own Audiobookshelf access token or API key. The source validates the caller's permission to access that exact item. Unauthorized responses are not bypassed by cache hits. Source credentials must not be put in URLs or logs.
+
+A client can now request `GET /v1/items/{item_id}/manifest` with `Authorization: Bearer <transcriber-token>` and `X-Audiobookshelf-Token: <audiobookshelf-token>`. No arbitrary source URL or audio path can be supplied by a client. Audio is not exposed through a public download endpoint; ingestion is an internal adapter for the forthcoming engine.
+
 ## API
 
 | Endpoint | Authentication | Purpose |
 | --- | --- | --- |
 | GET /healthz | None | Process liveness |
 | GET /readyz | None | Engine readiness; currently HTTP 503 |
-| GET /v1/capabilities | Bearer token | Version and available functionality |
+| GET /v1/capabilities | Bearer token | Version, source ID and available functionality |
+| GET /v1/items/{item_id}/manifest | Both credentials | Authorized audio identity and timeline |
 
-See [the transcript contract](docs/TRANSCRIPT-CONTRACT.md). The current token is an operator credential, not an Audiobookshelf user credential. No transcript access is enabled until source authorization is implemented.
+See [the transcript contract](docs/TRANSCRIPT-CONTRACT.md). The transcriber token is not an Audiobookshelf user credential. No transcript access is enabled until the engine, queue and authorization-preserving cache API are implemented.
 
 ## Development
 
