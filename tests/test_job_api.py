@@ -138,22 +138,45 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.request("POST", route + "/discard")[0], 200)
         self.assertEqual(self.request("GET", route)[0], 404)
 
-    def test_background_refresh_credentials_are_local_operator_only(self):
+    def test_paired_background_refresh_and_revocation(self):
         self.server.background.check_model = lambda *args, **kwargs: None
-        self.server.background.execute = lambda *args: (_ for _ in ()).throw(EngineError("test_stop"))
+        self.server.background.check_model = lambda *args, **kwargs: None
+        entered = threading.Event()
+        def execute(source, identity, token, directory, engine, start, end, cancelled, fd):
+            entered.set()
+            deadline = time.monotonic() + 5
+            while not cancelled() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not cancelled():
+                raise EngineError("test_timeout")
+            raise EngineError("cancelled")
+        self.server.background.execute = execute
         code = self.server.pairing.issue()
         status, redeemed = self.server.pairing.redeem(code)
         self.assertEqual(status, 200)
         body = {"source_id": "home", "item_id": "book", "audio_revision": IDENTITY.audio_revision, "model": "tiny"}
         headers = {"X-FitBaus-Background-Refresh": "private-refresh"}
-        self.assertEqual(self.request("POST", "/v1/background", body, operator=redeemed["token"], extra_headers=headers)[0], 401)
+        self.assertEqual(self.request("POST", "/v1/background", body, operator="invalid", extra_headers=headers)[0], 401)
         self.assertEqual(self.request("POST", "/v1/background", body, extra_headers={"X-FitBaus-Background-Lease": "invalid"})[0], 400)
-        status, result = self.request("POST", "/v1/background", body, extra_headers=headers)
+        status, result = self.request("POST", "/v1/background", body, operator=redeemed["token"], extra_headers=headers)
         self.assertEqual(status, 202)
         self.assertTrue(result["authorization_active"])
         self.assertIsNone(result["authorization_remaining_seconds"])
         self.assertTrue(result["authorization_renewable"])
         self.assertNotIn("private-refresh", json.dumps(result))
+        self.assertTrue(entered.wait(3))
+        self.assertEqual(self.request("POST", "/v1/pairing/revoke-all")[0], 200)
+        deadline = time.monotonic() + 5
+        route = "/v1/background/" + result["job_id"]
+        while time.monotonic() < deadline:
+            _, current = self.request("GET", route)
+            if current["state"] == "waiting_credentials":
+                break
+            time.sleep(0.02)
+        self.assertEqual(current["state"], "waiting_credentials")
+        self.assertFalse(current["authorization_active"])
+        self.assertEqual(current["processed_ms"], 0)
+        self.assertEqual(self.request("GET", route, operator=redeemed["token"])[0], 401)
 
     def test_prepared_window_uses_actual_profile_without_live_inference(self):
         prepared = self.server.background.store

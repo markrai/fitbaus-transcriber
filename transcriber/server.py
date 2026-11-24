@@ -136,6 +136,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"code": self.server.pairing.issue(), "expires_in": TTL_SECONDS})
             try:
                 self.server.pairing.revoke_all()
+                if self.server.background is not None:
+                    self.server.background.revoke_paired()
                 return self._json(200, {"revoked": True})
             except (OSError, sqlite3.Error):
                 return self._json(503, {"error": "pairing_storage_error"})
@@ -178,6 +180,9 @@ class Handler(BaseHTTPRequestHandler):
                 "prepared_transcripts": True,
                 "unattended_background_local": True,
                 "background_job_lifetime_authorization": True,
+                "paired_model_management": True,
+                "paired_background_refresh": True,
+                "source_url": self.server.config.source.base_url if self.server.config.source else None,
                 "running_job_cancel": True,
                 "inference_timeout_seconds": self.server.config.engine.inference_timeout,
                 "pairing_api": True,
@@ -204,7 +209,9 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(404, {"error": "not_found"})
 
     def _manage_model(self, name, cancel=False):
-        if self.client_address[0] not in ("127.0.0.1", "::1") or not self._operator_authorized():
+        if not self._authorized():
+            return self._json(401, {"error": "unauthorized"})
+        if self._operator_authorized() and self.client_address[0] not in ("127.0.0.1", "::1"):
             return self._json(401, {"error": "unauthorized"})
         try:
             accepted = self.server.downloads.cancel(name) if cancel else self.server.downloads.start(name)
@@ -274,8 +281,20 @@ class Handler(BaseHTTPRequestHandler):
         try:
             leases = self.headers.get_all("X-FitBaus-Background-Lease") or []
             refreshes = self.headers.get_all("X-FitBaus-Background-Refresh") or []
+            operator = self._operator_authorized()
+            guard = None
+            if not operator:
+                pairing = self.server.pairing
+                device_token = self.headers["Authorization"][7:]
+                def guard():
+                    try:
+                        return pairing.authorized(device_token)
+                    except (OSError, sqlite3.Error):
+                        return False
             if leases or refreshes:
-                if self.client_address[0] not in ("127.0.0.1", "::1") or not self._operator_authorized():
+                if operator and self.client_address[0] not in ("127.0.0.1", "::1"):
+                    return self._json(401, {"error": "unauthorized"})
+                if leases and not operator:
                     return self._json(401, {"error": "unauthorized"})
                 if action not in ("submit", "resume") or leases not in ([], ["24h"]) or len(refreshes) > 1 or (
                         refreshes and not valid_bearer(refreshes[0])):
@@ -288,7 +307,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("invalid_request")
                 identity = AudioIdentity(body["source_id"], body["item_id"], body["audio_revision"])
                 result = background.submit(identity, body["model"], token, body.get("start_ms", 0),
-                                           refresh=refresh)
+                                           refresh=refresh, guard=guard)
             elif action == "list":
                 manifest = background.runner.source.manifest(identifier, token)
                 result = {"jobs": [background.status(job) for job in background.store.for_item(
