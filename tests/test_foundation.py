@@ -18,6 +18,9 @@ class ConfigTests(unittest.TestCase):
         config = Config.from_env({"TRANSCRIBER_TOKEN": TOKEN})
         self.assertEqual(config.port, 8765)
         self.assertEqual(config.bind, "127.0.0.1")
+        self.assertEqual(config.engine.inference_timeout, 120)
+        with self.assertRaises(ValueError):
+            Config.from_env({"TRANSCRIBER_TOKEN": TOKEN, "TRANSCRIBER_INFERENCE_TIMEOUT": "9"})
 
     def test_invalid_config(self):
         for env in ({}, {"TRANSCRIBER_TOKEN": "short"},
