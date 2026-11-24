@@ -44,7 +44,22 @@ Pin an image digest (`ghcr.io/markrai/fitbaus-transcriber@sha256:...`) for conte
 | Base | Optional, not bundled | Candidate for live use after hardware qualification |
 | Small | Optional, not bundled | Background recommended |
 
-Only Tiny is executable in this phase. The authenticated capabilities response advertises the pinned model inventory; remote model downloads, activation, benchmarking and background job control are later phases. Medium and Large-v3 are not supported. Tiny retains its previous engine ID and language profile so existing cached transcripts remain compatible. Model weights are from [Systran's Faster-Whisper Tiny](https://huggingface.co/Systran/faster-whisper-tiny/tree/d90ca5fe260221311c53c58e660288d3deb8d356), a conversion of OpenAI Whisper under the MIT license. The corresponding [license notice](licenses/whisper-MIT.txt) is included in the image.
+Only Tiny is executable in this phase. The authenticated capabilities response advertises the pinned model inventory and download progress. Optional model downloads are managed by the local server operator; model activation, hardware qualification, remote administration and background job control are later phases. Medium and Large-v3 are not supported. Tiny retains its previous engine ID and language profile so existing cached transcripts remain compatible. Model weights are from [Systran's Faster-Whisper Tiny](https://huggingface.co/Systran/faster-whisper-tiny/tree/d90ca5fe260221311c53c58e660288d3deb8d356), a conversion of OpenAI Whisper under the MIT license. The corresponding [license notice](licenses/whisper-MIT.txt) is included in the image.
+
+### Manage optional models
+
+Start a download on the server using the operator CLI. For image-based installations, use `docker compose -f compose.release.yaml` instead of `docker compose`.
+
+```sh
+docker compose exec transcriber python -m transcriber download-model base
+docker compose exec transcriber python -m transcriber models
+docker compose exec transcriber python -m transcriber download-model small
+docker compose exec transcriber python -m transcriber cancel-model-download small
+```
+
+The start command admits a download and returns immediately. Use `models` to inspect progress and the terminal result; a second model cannot start until the first has finished. Downloads use fixed upstream revisions, verify file sizes and upstream SHA-256 (large files) or Git blob hashes, and atomically install into the data volume. Interrupted or cancelled staging is discarded; explicitly start again to retry. There is no automatic retry or partial-download resumption. The default optional-model quota is 1024 MiB (`TRANSCRIBER_MODEL_QUOTA_MIB`, accepted range 128–4096); at least 256 MiB of free disk is reserved during downloads. A 30-minute deadline bounds each download. Tiny stays the active inference model. Installed models are not automatically activated or deleted. A download can share the server's CPU, disk and network with playback, so avoid large downloads during latency-sensitive reading.
+
+Paired clients can inspect inventory but cannot initiate or cancel downloads yet. The local operator command uses the existing operator token internally over loopback. Do not copy that token to ordinary clients. See [model management API](docs/MODEL-MANAGEMENT.md).
 
 ## Publishing releases
 
