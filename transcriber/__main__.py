@@ -11,7 +11,8 @@ from .config import Config
 from .engine import EngineError, WhisperCpuEngine
 from .jobs import JobStore, QueueError
 from .runner import JobRunner
-from .model import prepare_model
+from .model import MODELS, prepare_model
+from .qualification import MAX_WAV_BYTES, inventory, qualify
 from .server import Service
 
 
@@ -21,6 +22,11 @@ def main(argv=None):
     commands.add_parser("serve")
     commands.add_parser("prepare-model")
     commands.add_parser("models")
+    commands.add_parser("qualification")
+    bench = commands.add_parser("benchmark")
+    bench.add_argument("--model", choices=("all", *MODELS), default="all")
+    bench.add_argument("--wav-stdin", action="store_true", required=True)
+    bench.add_argument("--probe", action="store_true")
     for name in ("download-model", "cancel-model-download"):
         command = commands.add_parser(name)
         command.add_argument("model", choices=("base", "small"))
@@ -74,6 +80,19 @@ def main(argv=None):
                     return 1
             finally:
                 client.close()
+        elif args.command == "qualification":
+            print(json.dumps(inventory(config.data_dir, config.engine), indent=2))
+        elif args.command == "benchmark":
+            raw = sys.stdin.buffer.read(MAX_WAV_BYTES + 1)
+            store = JobStore(config.data_dir / "queue", config.queue)
+            results = []
+            with store.worker() as lock_fd:
+                for name in MODELS if args.model == "all" else (args.model,):
+                    print("Benchmarking " + name, file=sys.stderr, flush=True)
+                    results.append(qualify(config.data_dir, name, config.engine, raw, lock_fd, args.probe))
+            print(json.dumps({"models": results}, indent=2))
+            if any(r["state"] in ("failed", "not_installed", "insufficient_memory") for r in results):
+                return 1
         elif args.command == "prepare-model":
             prepare_model(config.data_dir)
             print("Whisper CPU model prepared", file=sys.stderr)

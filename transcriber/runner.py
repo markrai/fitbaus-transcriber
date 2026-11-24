@@ -5,6 +5,8 @@ from .audiobookshelf import SourceError
 from .engine import ENGINE_ID, EngineError
 from .inference_process import supervised_window
 from .jobs import JobSpec, QueueError
+from .qualification import load_record
+from .resources import admission, snapshot
 
 
 def engine_profile(config):
@@ -73,6 +75,11 @@ class JobRunner:
                     args = (self.source, job.spec.identity, token, self.directory,
                             self.engine, job.spec.start_ms, job.spec.end_ms)
                     if self.transcribe is None:
+                        resources = snapshot()
+                        record = load_record(self.directory, "tiny", self.engine.config, resources)
+                        gate = admission("tiny", resources, record.get("peak_rss_bytes"))
+                        if not gate["allowed"] and gate["reason"] != "memory_unknown":
+                            raise EngineError("resource_unavailable")
                         window = supervised_window(*args, control.cancelled, lock_fd)
                     else:
                         window = self.transcribe(*args)
@@ -95,7 +102,7 @@ class JobRunner:
                             elif isinstance(error, EngineError):
                                 code = str(error) if str(error) in (
                                     "inference_timeout", "worker_crashed", "worker_unavailable",
-                                    "invalid_worker_result", "cancelled") else "engine_failed"
+                                    "invalid_worker_result", "cancelled", "resource_unavailable") else "engine_failed"
                             elif isinstance(error, QueueError) and str(error) == "result_limit":
                                 code = "result_limit"
                             else:

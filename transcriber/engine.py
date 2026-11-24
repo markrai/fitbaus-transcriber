@@ -96,8 +96,8 @@ def normalize_segments(segments, start_ms, end_ms):
 
 
 class WhisperCpuEngine:
-    def __init__(self, data_dir, config=EngineConfig()):
-        self.path = model_directory(data_dir)
+    def __init__(self, data_dir, config=EngineConfig(), *, model_name="tiny"):
+        self.path = model_directory(data_dir, model_name)
         self.config = config
         self._model = None
         self._lock = threading.Lock()
