@@ -102,3 +102,5 @@ class QualificationTests(unittest.TestCase):
                 self.assertEqual(failed["error"], "insufficient_memory")
                 self.assertEqual(calls, ["base", "base", "base"])
                 self.assertEqual(inventory(path, config, resources())["models"][1]["qualification"], value)
+            with patch("transcriber.qualification.model_present", return_value=False):
+                self.assertEqual(inventory(path, config, resources())["models"][1]["qualification"]["state"], "not_installed")
