@@ -91,7 +91,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.get("/healthz"), (200, {"status": "alive"}))
         status, body = self.get("/readyz")
         self.assertEqual(status, 503)
-        self.assertEqual(body["reason"], "engine_not_implemented")
+        self.assertEqual(body["reason"], "transcript_api_not_implemented")
 
     def test_capabilities_require_bearer(self):
         for token in (None, "wrong"):
