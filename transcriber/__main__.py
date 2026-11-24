@@ -99,7 +99,7 @@ def main(argv=None):
         command.add_argument("--token-stdin", action="store_true")
         if name in ("background-start", "background-resume"):
             command.add_argument("--unattended", action="store_true",
-                                 help="Authorize this job for up to 24 hours in RAM, until stopped or restarted")
+                                 help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     try:
         config = Config.from_env()
@@ -150,10 +150,10 @@ def main(argv=None):
             if any(r["state"] in ("failed", "not_installed", "insufficient_memory") for r in results):
                 return 1
         elif args.command and args.command.startswith("background-"):
-            unattended = getattr(args, "unattended", False)
+            renewable = args.command in ("background-start", "background-resume")
             refresh = None
-            if unattended:
-                print("Authorizing this job for up to 24 hours, in memory only. Restart requires login.", file=sys.stderr)
+            if renewable:
+                print("Authorizing this background job until completion or stop. Restart requires login.", file=sys.stderr)
                 token, refresh = source_credential(config, args.token_stdin, renewable=True)
             else:
                 token = source_credential(config, args.token_stdin)
@@ -162,10 +162,8 @@ def main(argv=None):
                 conn = http.client.HTTPConnection("127.0.0.1", config.port, timeout=60)
                 try:
                     request_headers = dict(headers)
-                    if unattended and method == "POST":
-                        request_headers["X-FitBaus-Background-Lease"] = "24h"
-                        if refresh is not None:
-                            request_headers["X-FitBaus-Background-Refresh"] = refresh
+                    if renewable and method == "POST" and refresh is not None:
+                        request_headers["X-FitBaus-Background-Refresh"] = refresh
                     if body is not None:
                         request_headers["Content-Type"] = "application/json"
                         body = json.dumps(body)

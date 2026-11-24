@@ -84,18 +84,27 @@ class BackgroundTests(unittest.TestCase):
         self.assertEqual(self.calls, [("base", 0, 300000), ("base", 300000, 600000), ("base", 600000, 600001)])
         self.assertNotIn(TOKEN.encode(), reopened.path.read_bytes())
 
-    def test_pause_cancel_discard_and_expiry(self):
+    def test_pause_cancel_discard_and_no_time_expiry(self):
         job = self.background.submit(IDENTITY, "tiny", TOKEN)
         job_id = job["job_id"]
         self.step()
-        self.now = 601
+        self.now = 7 * 86400
         self.background.expire()
-        self.assertEqual(self.background.status(self.store.get(job_id))["state"], "waiting_credentials")
-        self.assertEqual(self.background.action(job_id, TOKEN, "resume")["state"], "queued")
-        self.assertEqual(self.background.action(job_id, TOKEN, "pause")["state"], "paused")
+        status = self.background.status(self.store.get(job_id))
+        self.assertEqual(status["state"], "queued")
+        self.assertTrue(status["authorization_active"])
+        self.assertIsNone(status["authorization_remaining_seconds"])
+        self.assertFalse(status["authorization_renewable"])
+        paused = self.background.action(job_id, TOKEN, "pause")
+        self.assertEqual(paused["state"], "paused")
+        self.assertFalse(paused["authorization_active"])
+        self.assertNotIn(job_id, self.background.pending)
         self.assertIsNone(self.background.take(RunControl()))
         self.assertEqual(self.background.action(job_id, TOKEN, "resume")["next_ms"], 300000)
-        self.assertEqual(self.background.action(job_id, TOKEN, "cancel")["state"], "cancelled")
+        cancelled = self.background.action(job_id, TOKEN, "cancel")
+        self.assertEqual(cancelled["state"], "cancelled")
+        self.assertFalse(cancelled["authorization_active"])
+        self.assertNotIn(job_id, self.background.pending)
         self.assertEqual(self.background.action(job_id, TOKEN, "resume")["state"], "cancelled")
         self.background.action(job_id, TOKEN, "discard")
         with self.assertRaisesRegex(QueueError, "background_not_found"):
@@ -176,12 +185,11 @@ class BackgroundTests(unittest.TestCase):
         self.assertIsNone(reopened.find_prepared(spec, EngineConfig(language="fr")))
         self.assertEqual(len(self.calls), 1)
 
-    def test_unattended_renews_access_once_and_keeps_checkpoint(self):
+    def test_renews_access_beyond_old_limits_and_keeps_checkpoint(self):
         original_manifest = self.source.manifest
-        job_id = self.background.submit(IDENTITY, "small", TOKEN, unattended=True,
-                                        refresh="refresh-one")["job_id"]
+        job_id = self.background.submit(IDENTITY, "small", TOKEN, refresh="refresh-one")["job_id"]
         self.step()
-        self.now = 601
+        self.now = 7 * 86400
         self.background.expire()
         self.assertIn(job_id, self.background.pending)
         def manifest(item, token):
@@ -194,18 +202,21 @@ class BackgroundTests(unittest.TestCase):
         self.source.refresh_session = lambda refresh: ("new-access", "refresh-two")
         self.step()
         self.assertEqual(self.store.get(job_id).cursor_ms, 300000)
-        self.assertEqual(self.background.pending[job_id][:3], ("new-access", 86400, "refresh-two"))
+        self.assertEqual(self.background.pending[job_id], ("new-access", "refresh-two", self.now))
         self.step()
         self.assertEqual(self.store.get(job_id).cursor_ms, 600000)
         for secret in (TOKEN, "new-access", "refresh-one", "refresh-two"):
             self.assertNotIn(secret.encode(), self.store.path.read_bytes())
-        self.now = 86400
+        self.now += 7 * 86400
         self.background.expire()
-        self.assertEqual(self.background.status(self.store.get(job_id))["state"], "waiting_credentials")
+        self.assertIn(job_id, self.background.pending)
+        self.step()
+        self.assertEqual(self.store.get(job_id).state, "completed")
+        self.assertNotIn(job_id, self.background.pending)
+        self.assertFalse(self.background.status(self.store.get(job_id))["authorization_active"])
 
     def test_refresh_rejection_requires_fresh_login(self):
-        job_id = self.background.submit(IDENTITY, "small", TOKEN, unattended=True,
-                                        refresh="refresh-one")["job_id"]
+        job_id = self.background.submit(IDENTITY, "small", TOKEN, refresh="refresh-one")["job_id"]
         self.step()
         def expired(*args):
             raise SourceError("unauthorized")

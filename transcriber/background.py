@@ -22,8 +22,6 @@ from .resources import admission, snapshot
 MAX_PARENTS = 32
 MAX_BOOK_MS = 100 * 60 * 60 * 1000
 MAX_STAGE_BYTES = 128 * 1024 * 1024
-CREDENTIAL_TTL = 600
-UNATTENDED_TTL = 24 * 60 * 60
 REFRESH_COOLDOWN = 60
 
 
@@ -283,10 +281,10 @@ class Background:
         if require_memory and not gate["allowed"]:
             raise QueueError("resource_unavailable")
 
-    def credential(self, token, unattended, refresh):
-        return (token, self.clock() + (UNATTENDED_TTL if unattended else CREDENTIAL_TTL), refresh, None)
+    def credential(self, token, refresh):
+        return (token, refresh, None)
 
-    def submit(self, identity, name, token, start=0, *, unattended=False, refresh=None):
+    def submit(self, identity, name, token, start=0, *, refresh=None):
         manifest = self.runner.source.manifest(identity.item_id, token)
         if manifest.identity != identity:
             raise SourceError("stale_revision")
@@ -296,7 +294,7 @@ class Background:
                 raise QueueError("worker_unavailable")
             job = self.store.submit(identity, name, profile(name, self.config), manifest.duration_ms, start)
             if job.state == "pending":
-                self.pending[job.id] = self.credential(token, unattended, refresh)
+                self.pending[job.id] = self.credential(token, refresh)
             return self.status(job)
 
     def status(self, job):
@@ -305,17 +303,18 @@ class Background:
             state = job.state
             if state == "pending":
                 state = ("processing" if self.current == job.id else "queued"
-                         if job.id in self.pending and self.pending[job.id][1] > self.clock()
+                         if job.id in self.pending
                          else "waiting_credentials")
                 if state == "queued" and self.clock() < self.defer_until:
                     state = "waiting_resources"
             result = job.status(state)
             entry = self.pending.get(job.id)
-            result["authorization_remaining_seconds"] = max(0, int(entry[1] - self.clock())) if entry else 0
-            result["authorization_renewable"] = bool(entry and entry[2] and entry[1] > self.clock())
+            result["authorization_active"] = entry is not None
+            result["authorization_remaining_seconds"] = None if entry else 0
+            result["authorization_renewable"] = bool(entry and entry[1])
             return result
 
-    def action(self, job_id, token, action, *, unattended=False, refresh=None):
+    def action(self, job_id, token, action, *, refresh=None):
         job = self.store.get(job_id)
         self.authorize(job, token, exact=action == "resume")
         if action == "resume" and job.state not in ("completed", "cancelled"):
@@ -327,7 +326,7 @@ class Background:
             if action == "resume":
                 if job.state not in ("completed", "cancelled"):
                     job = self.store.transition(job_id, "pending")
-                    self.pending[job_id] = self.credential(token, unattended, refresh)
+                    self.pending[job_id] = self.credential(token, refresh)
             else:
                 if action == "discard":
                     if self.current == job_id:
@@ -345,9 +344,6 @@ class Background:
 
     def expire(self):
         with self.lock:
-            for job_id, (_, deadline, _, _) in list(self.pending.items()):
-                if deadline <= self.clock():
-                    self.pending.pop(job_id, None)
             if self.current is None and self.spool_key and self.spool_key[0] not in self.pending:
                 self.drop_spool()
 
@@ -355,10 +351,7 @@ class Background:
         with self.lock:
             if self.closed or self.clock() < self.defer_until:
                 return None
-            for job_id, (token, deadline, _, _) in list(self.pending.items()):
-                if deadline <= self.clock():
-                    self.pending.pop(job_id, None)
-                    continue
+            for job_id, (token, _, _) in list(self.pending.items()):
                 job = self.store.get(job_id)
                 if job.state != "pending":
                     self.pending.pop(job_id, None)
@@ -401,9 +394,9 @@ class Background:
             entry = self.pending.get(job.id)
             if entry is None or entry[0] != token or control.cancelled():
                 return
-            _, deadline, refresh, last = entry
+            _, refresh, last = entry
             now = self.clock()
-            if deadline <= now or refresh is None or (last is not None and now - last < REFRESH_COOLDOWN):
+            if refresh is None or (last is not None and now - last < REFRESH_COOLDOWN):
                 self.pending.pop(job.id, None)
                 self.drop_spool()
                 return
@@ -418,10 +411,7 @@ class Background:
             return
         with self.lock:
             if self.pending.get(job.id) is entry:
-                if self.clock() >= deadline:
-                    self.pending.pop(job.id, None)
-                else:
-                    self.pending[job.id] = (access, deadline, replacement, self.clock())
+                self.pending[job.id] = (access, replacement, self.clock())
                 self.drop_spool()
 
     def step(self, job, token, control):
