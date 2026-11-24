@@ -11,10 +11,10 @@ import threading
 import time
 
 from .audiobookshelf import SourceError, MAX_TRACK_BYTES
-from .contract import AudioIdentity, MAX_WINDOW_MS, TranscriptWindow
+from .contract import AudioIdentity, Cue, MAX_WINDOW_MS, SCHEMA, TranscriptWindow
 from .engine import EngineError, WhisperCpuEngine
 from .inference_process import supervised_window
-from .jobs import MAX_RESULT_BYTES, QueueError
+from .jobs import Job, JobSpec, MAX_RESULT_BYTES, QueueError
 from .model import model_directory, model_present, model_spec
 from .qualification import load_record
 from .resources import admission, snapshot
@@ -55,6 +55,20 @@ class BookJob:
                 "state": state or self.state, "error": self.error}
 
 
+@dataclass(frozen=True)
+class PreparedSpec(JobSpec):
+    parent_id: str
+
+    @property
+    def id(self):
+        return prepared_id(self.parent_id, self.start_ms, self.end_ms)
+
+
+def prepared_id(parent_id, start, end):
+    return hashlib.sha256(json.dumps(["fitbaus-prepared-v1", parent_id, start, end],
+                                    separators=(",", ":")).encode("ascii")).hexdigest()
+
+
 class BackgroundStore:
     def __init__(self, directory, max_parents=MAX_PARENTS, max_bytes=MAX_STAGE_BYTES):
         self.directory = Path(directory)
@@ -74,6 +88,13 @@ class BackgroundStore:
                 start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL,
                 result TEXT NOT NULL, result_bytes INTEGER NOT NULL,
                 PRIMARY KEY(parent_id,start_ms))""")
+            if "prepared_id" not in {row["name"] for row in db.execute("PRAGMA table_info(windows)")}:
+                db.execute("ALTER TABLE windows ADD COLUMN prepared_id TEXT")
+            for row in db.execute("SELECT parent_id,start_ms,end_ms FROM windows WHERE prepared_id IS NULL").fetchall():
+                db.execute("UPDATE windows SET prepared_id=? WHERE parent_id=? AND start_ms=?",
+                           (prepared_id(row["parent_id"], row["start_ms"], row["end_ms"]), row["parent_id"], row["start_ms"]))
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS prepared_window_id ON windows(prepared_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS prepared_book_identity ON books(source_id,item_id,revision)")
 
     @contextmanager
     def transaction(self):
@@ -159,12 +180,57 @@ class BackgroundStore:
             total = db.execute("SELECT coalesce(sum(result_bytes),0) FROM windows").fetchone()[0]
             if total + size > self.max_bytes:
                 raise QueueError("background_storage_full")
-            db.execute("INSERT INTO windows VALUES(?,?,?,?,?)",
-                       (job.id, window.start_ms, window.end_ms, result, size))
+            db.execute("INSERT INTO windows(parent_id,start_ms,end_ms,result,result_bytes,prepared_id) VALUES(?,?,?,?,?,?)",
+                       (job.id, window.start_ms, window.end_ms, result, size,
+                        prepared_id(job.id, window.start_ms, window.end_ms)))
             state = "completed" if window.end_ms == job.duration_ms else "pending"
             db.execute("UPDATE books SET cursor_ms=?,state=?,error=NULL,touched=? WHERE id=?",
                        (window.end_ms, state, time.time_ns(), job.id))
             return self.row(db.execute("SELECT * FROM books WHERE id=?", (job.id,)).fetchone())
+
+    @staticmethod
+    def prepared(row):
+        if row is None:
+            return None
+        try:
+            spec = PreparedSpec(AudioIdentity(row["source_id"], row["item_id"], row["revision"]),
+                                row["window_start"], row["window_end"], row["profile"], row["id"])
+            raw = row["result"]
+            if len(raw.encode("ascii")) > MAX_RESULT_BYTES or spec.id != row["prepared_id"]:
+                raise ValueError
+            value = json.loads(raw)
+            identity = AudioIdentity(value["source_id"], value["item_id"], value["audio_revision"])
+            coverage = value["coverage"]
+            window = TranscriptWindow(identity, coverage["start_ms"], coverage["end_ms"],
+                                      tuple(Cue(c["start_ms"], c["end_ms"], c["text"]) for c in value["cues"]))
+            if value["schema"] != SCHEMA or (identity, window.start_ms, window.end_ms) != (
+                    spec.identity, spec.start_ms, spec.end_ms):
+                raise ValueError
+            return Job(spec, "ready", 0, None, raw)
+        except (ValueError, TypeError, KeyError, RecursionError):
+            raise QueueError("background_storage_error") from None
+
+    def find_prepared(self, spec, config):
+        profiles = tuple(profile(name, config) for name in ("small", "base", "tiny"))
+        with self.transaction() as db:
+            row = db.execute("""
+                SELECT b.*,w.start_ms AS window_start,w.end_ms AS window_end,w.result,w.prepared_id
+                FROM books b JOIN windows w ON w.parent_id=b.id
+                WHERE b.source_id=? AND b.item_id=? AND b.revision=? AND w.start_ms=? AND w.end_ms=?
+                    AND b.profile IN (?,?,?) AND w.end_ms<=b.cursor_ms
+                ORDER BY CASE b.profile WHEN ? THEN 0 WHEN ? THEN 1 ELSE 2 END,b.id LIMIT 1
+            """, (spec.identity.source_id, spec.identity.item_id, spec.identity.audio_revision,
+                  spec.start_ms, spec.end_ms, *profiles, profiles[0], profiles[1])).fetchone()
+            return self.prepared(row)
+
+    def get_prepared(self, job_id):
+        with self.transaction() as db:
+            row = db.execute("""
+                SELECT b.*,w.start_ms AS window_start,w.end_ms AS window_end,w.result,w.prepared_id
+                FROM windows w JOIN books b ON b.id=w.parent_id
+                WHERE w.prepared_id=? AND w.end_ms<=b.cursor_ms
+            """, (job_id,)).fetchone()
+            return self.prepared(row)
 
     def discard(self, job_id):
         with self.transaction() as db:
