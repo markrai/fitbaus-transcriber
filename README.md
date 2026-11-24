@@ -6,7 +6,42 @@ FitBaus audiobook playback does not require this service. Transcription is an op
 
 ## Development status
 
-The foundation, Audiobookshelf source adapter, and CPU speech recognition engine are under development. An operator can now transcribe a bounded audiobook window locally using the CLI. The operator CLI now supports durable job submission, execution and persistent transcript caching. The asynchronous REST API now accepts bounded transcription jobs, reports status and serves completed transcript windows. No published production image is available.
+The foundation, Audiobookshelf source adapter, and CPU speech recognition engine are under development. An operator can now transcribe a bounded audiobook window locally using the CLI. The operator CLI now supports durable job submission, execution and persistent transcript caching. The asynchronous REST API now accepts bounded transcription jobs, reports status and serves completed transcript windows. Versioned Linux AMD64 container publishing is configured for GitHub releases. The first public image requires a published release and successful publishing workflow.
+
+## Install a published container image
+
+Published releases are distributed through [GitHub Container Registry](https://github.com/markrai/fitbaus-transcriber/pkgs/container/fitbaus-transcriber). This path requires Docker with Compose v2 on Linux AMD64, not a local Python environment, Git checkout or Docker build. ARM64 is not yet qualified.
+
+After a release and its container publishing workflow have succeeded, choose its exact tag from [Releases](https://github.com/markrai/fitbaus-transcriber/releases). The example below uses `v0.1.0` as an illustrative tag; replace it with an available release.
+
+```sh
+mkdir -p fitbaus-transcriber
+cd fitbaus-transcriber
+VERSION=v0.1.0
+curl -fsSLo compose.release.yaml "https://raw.githubusercontent.com/markrai/fitbaus-transcriber/$VERSION/compose.release.yaml"
+(umask 077; set -C; printf 'TRANSCRIBER_TOKEN=%s\nTRANSCRIBER_IMAGE=ghcr.io/markrai/fitbaus-transcriber:%s\n' "$(openssl rand -hex 32)" "$VERSION" > .env)
+```
+
+Set `AUDIOBOOKSHELF_URL`, `AUDIOBOOKSHELF_SOURCE_ID` and, for access from the bike on a trusted LAN, `TRANSCRIBER_LAN_BIND` in `.env` as described below. The default published port is 8765 and the default bind is loopback. Do not expose plain HTTP to the public internet.
+
+```sh
+docker compose -f compose.release.yaml pull
+docker compose -f compose.release.yaml run --rm --no-deps transcriber prepare-model
+docker compose -f compose.release.yaml up -d --wait --wait-timeout 120
+docker compose -f compose.release.yaml exec transcriber python -m transcriber pair
+```
+
+Model preparation is still a separate first-install step in this release phase. The model, queue, cached transcripts and pairing records remain in the named Compose volume. Do not run `down -v` when upgrading.
+
+For updates, back up the data volume, download the selected release's Compose file, change only `TRANSCRIBER_IMAGE` in your existing `.env` and repeat the pull, prepare-model (idempotent) and up commands. Keep the same project name and volume. To switch from a source-build installation, use the existing installation directory and project name, retain its `.env` and volume, and set the new image variable. Do not run source and release deployments concurrently against the same volume.
+
+Pin an image digest (`ghcr.io/markrai/fitbaus-transcriber@sha256:...`) for content-addressed deployments. Version tags are intended never to be overwritten, but registry tags are not inherently immutable. No floating `latest` tag is published in this phase.
+
+## Publishing releases
+
+Maintainers publish a GitHub release with a tag such as `v0.1.0`. The container workflow validates the tag, tests source, builds the Linux AMD64 image, and runs the image-based Compose smoke test, pairing check and real offline CPU transcription probes before pushing the version tag. It checks for an existing tag and refuses an observed overwrite. The image includes the AGPL license and OCI labels identifying the exact source revision, source repository and version. Corresponding source is available in this repository at the labeled revision.
+
+On the first successful publication, verify the package is public in GitHub package settings; a public source repository does not guarantee public package visibility. Confirm an unauthenticated pull from a clean machine before announcing availability. PR CI exercises the same image verification path without publishing or requiring package write access.
 
 ## Run the foundation locally
 
@@ -143,7 +178,7 @@ python -m unittest discover -s tests -v
 1. Headless service foundation, deployment and transcript contract.
 2. Audiobookshelf source authorization, audio identity and bounded audio ingestion.
 3. CPU speech recognition engine and durable revision/profile-aware job cache (implemented); asynchronous incremental transcript API (implemented).
-4. Container images and streamlined self-hosting documentation (next).
+4. Versioned container publishing (implemented; first public release pending), bundled model and streamlined self-hosting installer (next).
 5. Optional FitBaus connection and on-demand Read Along.
 6. GPU acceleration and optional remote workers.
 
