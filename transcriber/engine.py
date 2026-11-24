@@ -5,12 +5,12 @@ import threading
 
 from .audiobookshelf import SourceError
 from .contract import Cue, MAX_CUE_CHARS, MAX_CUES, MAX_WINDOW_MS, TranscriptWindow
-from .model import MODEL_REVISION, model_directory, model_present
+from .model import model_spec, model_directory, model_present
 
 SAMPLE_RATE = 16_000
 BYTES_PER_MS = 32
 MAX_DECODE_BYTES = MAX_WINDOW_MS * BYTES_PER_MS
-ENGINE_ID = "faster-whisper-1.2.1-tiny-int8-" + MODEL_REVISION
+ENGINE_ID = model_spec().engine_id
 FORMATS = "aac,mp3,mov,mp4,m4a,3gp,3g2,mj2,flac,wav,ogg,matroska,webm,asf,aiff"
 
 
