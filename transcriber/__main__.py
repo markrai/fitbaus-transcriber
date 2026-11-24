@@ -33,6 +33,8 @@ def main(argv=None):
         elif args.command == "transcribe":
             if config.source is None:
                 raise ValueError("Audiobookshelf source not configured")
+            if not args.token_stdin and not sys.stdin.isatty():
+                raise ValueError("Use --token-stdin for noninteractive credentials")
             token = (sys.stdin.readline(8194).rstrip("\r\n") if args.token_stdin
                      else getpass.getpass("Audiobookshelf access token or API key: "))
             if not valid_bearer(token):
