@@ -286,7 +286,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = background.action(identifier, token, action)
             self.server.dispatcher.wake()
             return self._json(202 if action in ("submit", "resume") and
-                              result.get("state") in ("queued", "processing") else 200, result)
+                              result.get("state") in ("queued", "processing", "waiting_resources") else 200, result)
         except TimeoutError:
             return self._json(408, {"error": "request_timeout"})
         except (ValueError, TypeError, UnicodeError, RecursionError):
