@@ -106,14 +106,7 @@ A client can now request `GET /v1/items/{item_id}/manifest` with `Authorization:
 
 ## CPU transcription qualification
 
-After configuring Audiobookshelf, provision the model once:
-
-```sh
-docker compose build
-docker compose run --rm --no-deps transcriber prepare-model
-```
-
-This explicitly downloads a pinned multilingual Faster-Whisper tiny checkpoint into the persistent data volume. Subsequent inference loads it locally using CTranslate2 CPU INT8; audiobook audio is not sent to any third-party service. The model provisioning step needs internet access.
+The Docker image includes the pinned multilingual Faster-Whisper Tiny checkpoint. Inference uses local CTranslate2 CPU INT8; audiobook audio is not sent to any third-party service. The legacy `prepare-model` command remains available for non-container development and is a no-op when the bundled model is present. Existing downloaded Tiny files remain untouched.
 
 Run a 60-second test on a book (substitute its library item ID):
 
