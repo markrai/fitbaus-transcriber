@@ -1,4 +1,5 @@
-from dataclasses import asdict
+from dataclasses import asdict, replace
+from contextlib import nullcontext
 import hashlib
 import io
 import json
@@ -20,6 +21,8 @@ MAX_WAV_BYTES = 10 * 1024 * 1024
 MAX_OUTPUT_BYTES = 4096
 RUNS = 2
 LIVE_WINDOW_SECONDS = 60
+AUTOMATIC_SAMPLE_KIND = "synthetic-english-v1"
+AUTOMATIC_SAMPLE = Path("/opt/fitbaus-qualification/sample.wav")
 
 
 def parse_sample(raw, probe=False):
@@ -37,7 +40,9 @@ def parse_sample(raw, probe=False):
     return pcm, frames * 1000 // 16000
 
 
-def measure(data_dir, name, config, raw, lock_fd, timeout=120):
+def measure(data_dir, name, config, raw, lock_fd, timeout=120, cancelled=lambda: False):
+    if cancelled():
+        raise EngineError("cancelled")
     started = time.monotonic()
     env = {key: value for key, value in os.environ.items()
            if key not in ("TRANSCRIBER_TOKEN", "TRANSCRIBER_TOKEN_FILE", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN")}
@@ -49,8 +54,22 @@ def measure(data_dir, name, config, raw, lock_fd, timeout=120):
                                pass_fds=(lock_fd,), env=env)
     finished = False
     try:
-        output, _ = process.communicate(input=raw, timeout=timeout)
-        finished = True
+        deadline = started + timeout
+        request = raw
+        while True:
+            if cancelled():
+                raise EngineError("cancelled")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise EngineError("benchmark_timeout")
+            try:
+                output, _ = process.communicate(input=request, timeout=min(0.1, remaining))
+                finished = True
+                break
+            except subprocess.TimeoutExpired:
+                request = None
+        if cancelled():
+            raise EngineError("cancelled")
         elapsed = time.monotonic() - started
         if process.returncode != 0:
             raise EngineError("benchmark_worker_failed")
@@ -89,7 +108,9 @@ def record_path(data_dir, name):
 def load_record(data_dir, name, config, resources):
     try:
         record = json.loads(record_path(data_dir, name).read_text())
-        if record["fingerprint"] != fingerprint(name, config, resources):
+        if record["fingerprint"] != fingerprint(name, config, resources) or (
+                record.get("sample_kind") not in (None, AUTOMATIC_SAMPLE_KIND)):
+
             return {"state": "stale"}
         return record
     except (OSError, ValueError, KeyError, TypeError):
@@ -109,35 +130,51 @@ def inventory(data_dir, config, resources=None):
     return {"resources": resources.to_json(), "models": result}
 
 
-def qualify(data_dir, name, config, raw, lock_fd, probe=False, sampler=snapshot, runner=measure):
+def qualify(data_dir, name, config, raw, lock_fd, probe=False, sampler=snapshot, runner=measure,
+            *, control=None, automatic=False):
     model_spec(name)
     _, duration = parse_sample(raw, probe)
     resources = sampler()
     record = {"id": name, "fingerprint": fingerprint(name, config, resources),
               "sample_sha256": hashlib.sha256(raw).hexdigest(), "audio_ms": duration,
               "measured_at": int(time.time()), "runs": [], "state": "unqualified"}
+    benchmark_config = replace(config, language="en") if automatic else config
+    if automatic:
+        record.update(sample_kind=AUTOMATIC_SAMPLE_KIND, benchmark_language="en")
     if not model_present(model_directory(data_dir, name)):
         record.update(state="not_installed", error="model_not_prepared")
         return record
     try:
         for _ in range(1 if probe else RUNS):
-            gate = admission(name, sampler())
+            if control is not None and control.cancelled():
+                raise EngineError("cancelled")
+            peak = max((run["peak_rss_bytes"] for run in record["runs"]), default=None)
+            gate = admission(name, sampler(), peak)
             if not gate["allowed"]:
                 raise EngineError(gate["reason"])
-            record["runs"].append(runner(data_dir, name, config, raw, lock_fd, config.inference_timeout))
+            args = (data_dir, name, benchmark_config, raw, lock_fd, config.inference_timeout)
+            result = runner(*args, cancelled=control.cancelled) if control is not None else runner(*args)
+            record["runs"].append(result)
         record["peak_rss_bytes"] = max(run["peak_rss_bytes"] for run in record["runs"])
         record["state"] = classify(record["runs"], duration, probe)
         record["admission"] = admission(name, sampler(), record["peak_rss_bytes"])
         if not record["admission"]["allowed"] and not probe:
             record["state"] = "insufficient_memory"
     except (EngineError, OSError) as error:
+        if control is not None and (control.cancelled() or str(error) == "cancelled"):
+            raise EngineError("cancelled") from None
         record.update(state="failed", error=str(error) if isinstance(error, EngineError) else "benchmark_unavailable")
     if not probe:
-        path = record_path(data_dir, name)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(record, separators=(",", ":")), encoding="utf-8")
-        temporary.replace(path)
+        with (control.gate if control is not None else nullcontext()):
+            if control is not None and control.cancelled():
+                raise EngineError("cancelled")
+            path = record_path(data_dir, name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(record, separators=(",", ":")), encoding="utf-8")
+            temporary.replace(path)
+            if control is not None:
+                control.finished = True
     return record
 
 
