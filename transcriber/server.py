@@ -16,6 +16,7 @@ from .runner import JobRunner
 from .engine import ENGINE_ID, WhisperCpuEngine
 from .model import DEFAULT_MODEL, model_directory, model_present
 from .model_downloads import ModelDownloads, DownloadError
+from .qualification import inventory as qualification_inventory
 
 
 class Service(ThreadingHTTPServer):
@@ -165,6 +166,7 @@ class Handler(BaseHTTPRequestHandler):
                 "default_model": DEFAULT_MODEL,
                 "models": self.server.downloads.inventory(),
                 "model_download_api": True,
+                "model_qualification_api": True,
                 "model_quota_mib": self.server.config.model_quota_mib,
                 "job_api": True,
                 "running_job_cancel": True,
@@ -174,6 +176,8 @@ class Handler(BaseHTTPRequestHandler):
                 "source_configured": self.server.source is not None,
                 "source_id": self.server.config.source.source_id if self.server.config.source else None,
             })
+        if self.path == "/v1/qualification":
+            return self._json(200, qualification_inventory(self.server.config.data_dir, self.server.config.engine))
         if self.path == "/v1/models":
             return self._json(200, {"models": self.server.downloads.inventory(), "quota_mib": self.server.config.model_quota_mib})
         match = re.fullmatch(r"/v1/items/([A-Za-z0-9_-]{1,128})/manifest", self.path)
