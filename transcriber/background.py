@@ -241,7 +241,7 @@ class Background:
     def action(self, job_id, token, action):
         job = self.store.get(job_id)
         self.authorize(job, token, exact=action == "resume")
-        if action == "resume":
+        if action == "resume" and job.state not in ("completed", "cancelled"):
             self.check_model(job.model)
         with self.lock:
             if self.closed:
@@ -252,14 +252,17 @@ class Background:
                     job = self.store.transition(job_id, "pending")
                     self.pending[job_id] = (token, self.clock() + CREDENTIAL_TTL)
             else:
-                if self.current == job_id and self.control is not None:
-                    self.control.cancel()
-                self.pending.pop(job_id, None)
                 if action == "discard":
                     if self.current == job_id:
                         raise QueueError("background_busy")
                     self.store.discard(job_id)
+                    self.pending.pop(job_id, None)
                     return {"job_id": job_id, "discarded": True}
+                if self.current == job_id and self.control is not None:
+                    self.control.cancel()
+                self.pending.pop(job_id, None)
+                if self.current is None and self.spool_key and self.spool_key[0] == job_id:
+                    self.drop_spool()
                 job = self.store.transition(job_id, "paused" if action == "pause" else "cancelled")
             return self.status(job)
 
@@ -361,3 +364,5 @@ class Background:
             self.pending.clear()
             if self.control is not None:
                 self.control.cancel()
+            else:
+                self.drop_spool()
