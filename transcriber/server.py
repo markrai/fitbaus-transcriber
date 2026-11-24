@@ -167,6 +167,8 @@ class Handler(BaseHTTPRequestHandler):
                 "model_download_api": True,
                 "model_quota_mib": self.server.config.model_quota_mib,
                 "job_api": True,
+                "running_job_cancel": True,
+                "inference_timeout_seconds": self.server.config.engine.inference_timeout,
                 "pairing_api": True,
                 "max_window_ms": MAX_WINDOW_MS,
                 "source_configured": self.server.source is not None,
@@ -285,7 +287,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if action == "cancel":
-                self.server.dispatcher.cancel(job_id, token)
+                active = self.server.dispatcher.cancel(job_id, token)
+                if active:
+                    return self._json(202, {"job_id": job_id, "cancel_requested": True})
                 return self._json(200, {"job_id": job_id, "cancelled": True})
             if action == "transcript":
                 return self._json(200, self.server.runner.result(job_id, token))
