@@ -7,6 +7,8 @@ import re
 from .audiobookshelf import Audiobookshelf, SourceError, valid_bearer
 
 from .contract import SCHEMA, MAX_WINDOW_MS
+from .engine import ENGINE_ID
+from .model import model_directory, model_present
 
 
 class Service(ThreadingHTTPServer):
@@ -74,7 +76,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/healthz":
             return self._json(200, {"status": "alive"})
         if self.path == "/readyz":
-            return self._json(503, {"status": "not_ready", "reason": "engine_not_implemented"})
+            return self._json(503, {"status": "not_ready", "reason": "transcript_api_not_implemented"})
         if not self._authorized():
             return self._json(401, {"error": "unauthorized"})
         if self.path == "/v1/capabilities":
@@ -83,6 +85,8 @@ class Handler(BaseHTTPRequestHandler):
                 "transcript_schema": SCHEMA,
                 "engine_ready": False,
                 "transcription": False,
+                "engine_id": ENGINE_ID,
+                "model_present": model_present(model_directory(self.server.config.data_dir)),
                 "max_window_ms": MAX_WINDOW_MS,
                 "source_configured": self.server.source is not None,
                 "source_id": self.server.config.source.source_id if self.server.config.source else None,
