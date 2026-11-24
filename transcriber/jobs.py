@@ -124,7 +124,7 @@ class JobStore:
                         UPDATE jobs SET state=CASE WHEN attempts >= ? THEN 'failed' ELSE 'queued' END,
                             error='interrupted', touched=? WHERE state='running'
                     """, (MAX_ATTEMPTS, time.time_ns()))
-                yield
+                yield lock.fileno()
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
@@ -208,7 +208,8 @@ class JobStore:
             return self._get(db, job_id)
 
     def fail(self, job_id, error):
-        if error not in ("source_failed", "engine_failed", "result_limit", "internal_error"):
+        if error not in ("source_failed", "engine_failed", "result_limit", "internal_error",
+                         "inference_timeout", "worker_crashed", "cancelled", "worker_unavailable", "invalid_worker_result"):
             raise ValueError("Invalid failure classification")
         with self._transaction() as db:
             db.execute("UPDATE jobs SET state='failed',error=?,touched=? WHERE id=? AND state='running'",
