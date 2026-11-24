@@ -9,6 +9,7 @@ import unittest
 
 from transcriber.audiobookshelf import SourceConfig, SourceError
 from transcriber.config import Config
+from transcriber.background import profile
 from transcriber.contract import AudioIdentity, Cue, TranscriptWindow
 from transcriber.dispatcher import Dispatcher
 from transcriber.engine import EngineConfig, EngineError
@@ -136,6 +137,43 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/v1/items/book/background")[1]["jobs"][0]["job_id"], job["job_id"])
         self.assertEqual(self.request("POST", route + "/discard")[0], 200)
         self.assertEqual(self.request("GET", route)[0], 404)
+
+    def test_prepared_window_uses_actual_profile_without_live_inference(self):
+        prepared = self.server.background.store
+        for name in ("tiny", "base", "small"):
+            job = prepared.submit(IDENTITY, name, profile(name, self.engine.config), 120000)
+            prepared.checkpoint(job, TranscriptWindow(IDENTITY, 0, 120000, (Cue(0, 120000, name),)))
+        code, status = self.submit(0, 120000)
+        self.assertEqual(code, 200)
+        self.assertTrue(status["prepared"])
+        self.assertEqual(status["state"], "ready")
+        self.assertEqual(status["profile"], profile("small", self.engine.config))
+        route = "/v1/jobs/" + status["job_id"]
+        self.assertEqual(self.request("GET", route + "/transcript")[1]["cues"][0]["text"], "small")
+        self.assertEqual(self.request("GET", route + "/transcript", user="denied")[0], 403)
+        self.assertEqual(self.request("DELETE", route)[0], 409)
+        self.assertEqual(self.calls, 0)
+        self.stop_server()
+        self.start_server()
+        self.assertEqual(self.submit(0, 120000)[1]["job_id"], status["job_id"])
+        self.assertEqual(self.request("GET", route + "/transcript")[1]["cues"][0]["text"], "small")
+        self.source.identity = AudioIdentity("home", "book", "c" * 64)
+        self.assertEqual(self.request("GET", route + "/transcript")[0], 409)
+        self.source.identity = IDENTITY
+        self.assertEqual(self.submit(0, 1000)[0], 202)
+
+    def test_prepared_discard_removes_only_its_model_and_falls_back(self):
+        prepared = self.server.background.store
+        for name in ("base", "small"):
+            job = prepared.submit(IDENTITY, name, profile(name, self.engine.config), 120000)
+            prepared.checkpoint(job, TranscriptWindow(IDENTITY, 0, 120000, ()))
+        first = self.submit(0, 120000)[1]
+        self.assertTrue(first["prepared"])
+        self.assertEqual(self.request("POST", "/v1/background/" + job.id + "/discard")[0], 200)
+        self.assertEqual(self.request("GET", "/v1/jobs/" + first["job_id"])[0], 404)
+        second = self.submit(0, 120000)[1]
+        self.assertEqual(second["profile"], profile("base", self.engine.config))
+        self.assertEqual(self.calls, 0)
 
     def test_readiness_distinguishes_model_availability(self):
         self.assertEqual(self.request("GET", "/readyz", operator=None, user=None)[0], 200)
