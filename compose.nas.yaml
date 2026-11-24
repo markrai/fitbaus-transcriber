@@ -1,0 +1,40 @@
+services:
+  transcriber:
+    image: ghcr.io/markrai/fitbaus-transcriber:REPLACE_WITH_RELEASE
+    restart: unless-stopped
+    environment:
+      TRANSCRIBER_TOKEN: "REPLACE_WITH_RANDOM_TOKEN"
+      TRANSCRIBER_PORT: "8765"
+      AUDIOBOOKSHELF_URL: "REPLACE_WITH_AUDIOBOOKSHELF_URL"
+      AUDIOBOOKSHELF_SOURCE_ID: home-library
+      TRANSCRIBER_CPU_THREADS: 2
+      TRANSCRIBER_LANGUAGE: auto
+      TRANSCRIBER_DECODE_TIMEOUT: 120
+      TRANSCRIBER_INFERENCE_TIMEOUT: 120
+      TRANSCRIBER_MAX_JOBS: 512
+      TRANSCRIBER_MAX_ACTIVE_JOBS: 64
+      TRANSCRIBER_CACHE_MIB: 128
+      TRANSCRIBER_MODEL_QUOTA_MIB: 1024
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - transcriber-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 2g
+    cpus: 2.0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=2).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  transcriber-data:

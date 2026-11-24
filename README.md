@@ -8,6 +8,10 @@ FitBaus audiobook playback does not require this service. Transcription is an op
 
 The foundation, Audiobookshelf source adapter, and CPU speech recognition engine are under development. An operator can now transcribe a bounded audiobook window locally using the CLI. The operator CLI now supports durable job submission, execution and persistent transcript caching. The asynchronous REST API now accepts bounded transcription jobs, reports status and serves completed transcript windows. Versioned Linux AMD64 container publishing is configured for GitHub releases. The first public image requires a published release and successful publishing workflow.
 
+## NAS and Portainer deployment
+
+For a GUI-based installation, use [Portainer, Synology and UGREEN instructions](docs/NAS-DEPLOYMENT.md). Portainer Docker Standalone uses [compose.release.yaml](compose.release.yaml) and its environment-variable editor. Synology Container Manager and UGREEN Docker projects can use the self-contained [compose.nas.yaml](compose.nas.yaml) template after replacing its placeholders. Pair from the container's GUI terminal without host SSH. Linux AMD64 only; physical NAS and first public image qualification remain pending.
+
 ## Guided installation (recommended)
 
 Once a release containing the installer has been published and its public image is available, run the following on the Linux AMD64 Docker host in a new directory. Replace the illustrative tag with an available release. Review the downloaded script before running it.
