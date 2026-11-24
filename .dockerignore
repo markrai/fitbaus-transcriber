@@ -1,5 +1,6 @@
 *
 !requirements-cpu.txt
+!LICENSE
 !transcriber/
 !transcriber/**
 **/__pycache__
