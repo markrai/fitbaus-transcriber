@@ -145,6 +145,27 @@ class ModelDownloads:
         self.active = None
         self.closed = False
         self.cancelled = False
+        self._recover()
+
+    def _recover(self):
+        if not self.root.is_dir():
+            return
+        fd = os.open(self.root / ".download.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            for spec in MODELS.values():
+                if spec.bundled:
+                    continue
+                shutil.rmtree(self.root / (".download-" + spec.name), ignore_errors=True)
+                status = read_status(self.root, spec.name)
+                if status["state"] in ("downloading", "verifying") and not model_present(model_directory(self.data_dir, spec.name)):
+                    write_status(self.root, spec.name, "interrupted", status["received_bytes"],
+                                 status["total_bytes"], "download_interrupted")
+        finally:
+            os.close(fd)
 
     def inventory(self):
         with self.lock:
@@ -189,11 +210,17 @@ class ModelDownloads:
                 if shutil.disk_usage(self.root).free < spec.approximate_bytes + RESERVE_BYTES:
                     raise DownloadError("insufficient_disk")
                 write_status(self.root, name, "downloading")
-                self.process = self.spawn(
+                try:
+                    self.process = self.spawn(
                     [sys.executable, "-m", "transcriber.model_downloads", str(self.data_dir), name, str(self.quota_bytes)],
                     pass_fds=(fd,), start_new_session=True, stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    env={**os.environ, "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1"})
+                    env={**{key: value for key, value in os.environ.items()
+                            if key not in ("TRANSCRIBER_TOKEN", "TRANSCRIBER_TOKEN_FILE", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN")},
+                         "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1"})
+                except OSError:
+                    write_status(self.root, name, "failed", error="download_unavailable")
+                    raise
                 self.active = name
                 self.cancelled = False
                 self.thread = threading.Thread(target=self._monitor, args=(name, self.process, fd), daemon=True)
