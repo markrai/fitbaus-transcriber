@@ -33,17 +33,19 @@ class Dispatcher:
             if self.closed:
                 raise QueueError("worker_unavailable")
             job = self.runner.store.get(job_id)
-            if job.state == "ready" or job_id == self.current:
-                return job
+            if job.state == "ready":
+                return job, False
+            if job_id == self.current:
+                return job, True
             if job.attempts >= MAX_ATTEMPTS:
-                return job
+                return job, False
             if job.state == "failed" and not retry:
-                return job
+                return job, False
             if job_id not in self.pending and len(self.pending) + int(self.current is not None) >= self.capacity:
                 raise QueueError("queue_full")
             self.pending[job_id] = (token, self.clock() + self.credential_ttl)
             self.condition.notify()
-            return job
+            return job, True
 
     def dispatch_state(self, job):
         with self.condition:
