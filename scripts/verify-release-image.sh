@@ -67,3 +67,5 @@ for probe in verify_cpu.py verify_api.py; do
         -v "$scratch/narration.wav:/narration.wav:ro" \
         -v "$PWD/tests/$probe:/probe.py:ro" transcriber /probe.py /narration.wav
 done
+
+bash scripts/verify-nas-stack.sh
