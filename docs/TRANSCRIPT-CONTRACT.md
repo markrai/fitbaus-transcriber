@@ -46,6 +46,14 @@ Text is Unicode plain text, not HTML. A cue may contain at most 1,200 characters
 
 The renderer selects cues from the current audio position rather than a separate wall clock. Seek and playback speed therefore require no transcript retiming.
 
+## CPU engine qualification
+
+The initial engine uses pinned Faster-Whisper 1.2.1 and the multilingual tiny model, with CPU INT8 inference, one model worker, configurable CPU threads and voice activity detection. The engine identifier is exposed in capabilities; future cached results must also distinguish model and inference configuration (including requested language).
+
+Each requested window is intersected with the ordered source tracks. FFmpeg decodes only the requested local slice to 16 kHz mono signed 16-bit PCM. Each slice is transcribed independently and segment timestamps are rebased into absolute book time. Cues are clipped to the window and normalized into non-overlapping intervals. Track rounding gaps of up to one millisecond are allowed. Decoder padding/truncation tolerance is bounded; malformed or substantially short audio fails instead of publishing a ready result. Adjacent windows can cut sentences; overlap-aware stitching is deferred.
+
+Permissions and manifest revision are checked again before returning the complete window. The operator-only CLI is the qualification entry point. The engine does not expose a public synchronous transcription endpoint; durable job processing, cancellation and aggregate resource limits belong to the next phase.
+
 ## Future transport
 
 A later phase will expose authorized requests for bounded windows, distinguish pending, ready, failed, and stale revisions, and publish a client-facing API specification. Job submissions must be idempotent and bounded. The service must never accept an arbitrary media URL from a client or forward credentials to a redirected origin.
