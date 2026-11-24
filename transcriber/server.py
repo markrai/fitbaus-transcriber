@@ -18,6 +18,7 @@ from .engine import ENGINE_ID, WhisperCpuEngine
 from .model import DEFAULT_MODEL, model_directory, model_present
 from .model_downloads import ModelDownloads, DownloadError
 from .qualification import inventory as qualification_inventory
+from .automatic_qualification import AutomaticQualification
 
 
 class Service(ThreadingHTTPServer):
@@ -33,6 +34,7 @@ class Service(ThreadingHTTPServer):
         self.downloads = ModelDownloads(config.data_dir, config.model_quota_mib)
         self.dispatcher = None
         self.background = None
+        self.qualification = None
         self.runner = runner
         if self.source is not None and self.runner is None:
             self.runner = JobRunner(JobStore(config.data_dir / "queue", config.queue),
@@ -49,7 +51,9 @@ class Service(ThreadingHTTPServer):
             prepared = BackgroundStore(config.data_dir / "background")
             self.runner.prepared = prepared
             self.background = Background(self.runner, prepared)
-            self.dispatcher = Dispatcher(self.runner, config.queue.max_active, background=self.background)
+            self.qualification = AutomaticQualification(self.runner)
+            self.dispatcher = Dispatcher(self.runner, config.queue.max_active, background=self.background,
+                                         qualification=self.qualification)
 
     def readiness(self):
         if self.source is None:
@@ -174,6 +178,7 @@ class Handler(BaseHTTPRequestHandler):
                 "models": self.server.downloads.inventory(),
                 "model_download_api": True,
                 "model_qualification_api": True,
+                "automatic_model_qualification": bool(self.server.qualification and self.server.qualification.available),
                 "model_quota_mib": self.server.config.model_quota_mib,
                 "job_api": True,
                 "background_job_api": True,
@@ -191,7 +196,9 @@ class Handler(BaseHTTPRequestHandler):
                 "source_id": self.server.config.source.source_id if self.server.config.source else None,
             })
         if self.path == "/v1/qualification":
-            return self._json(200, qualification_inventory(self.server.config.data_dir, self.server.config.engine))
+            result = (self.server.qualification.inventory() if self.server.qualification is not None else
+                      qualification_inventory(self.server.config.data_dir, self.server.config.engine))
+            return self._json(200, result)
         if self.path == "/v1/models":
             return self._json(200, {"models": self.server.downloads.inventory(), "quota_mib": self.server.config.model_quota_mib})
         match = re.fullmatch(r"/v1/background/([0-9a-f]{64})", self.path)
@@ -224,6 +231,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(503, {"error": "download_unavailable"})
 
     def do_POST(self):
+        match = re.fullmatch(r"/v1/models/(base|small)/qualify", self.path)
+        if match:
+            if not self._authorized() or (self._operator_authorized() and self.client_address[0] not in ("127.0.0.1", "::1")):
+                return self._json(401, {"error": "unauthorized"})
+            if self.server.qualification is None:
+                return self._json(503, {"error": "qualification_unavailable"})
+            try:
+                accepted = self.server.qualification.retry(match.group(1))
+                self.server.dispatcher.wake()
+                return self._json(202 if accepted else 200, {"accepted": accepted})
+            except QueueError as error:
+                return self._job_error(error)
         match = re.fullmatch(r"/v1/models/([a-z0-9-]{1,32})/(download|cancel)", self.path)
         if match:
             return self._manage_model(match.group(1), match.group(2) == "cancel")
@@ -317,7 +336,7 @@ class Handler(BaseHTTPRequestHandler):
                 background.authorize(job, token, exact=False)
                 result = background.status(job)
             else:
-                result = background.action(identifier, token, action, refresh=refresh)
+                result = background.action(identifier, token, action, refresh=refresh, guard=guard)
             self.server.dispatcher.wake()
             return self._json(202 if action in ("submit", "resume") and
                               result.get("state") in ("queued", "processing", "waiting_resources") else 200, result)
@@ -396,7 +415,7 @@ class Handler(BaseHTTPRequestHandler):
             "background_not_found": 404, "background_full": 429, "background_storage_full": 409,
             "background_not_discardable": 409, "background_busy": 409,
             "background_storage_error": 503, "background_disk_full": 409, "model_not_prepared": 409,
-            "model_not_qualified": 409, "resource_unavailable": 503,
+            "model_not_qualified": 409, "resource_unavailable": 503, "qualification_unavailable": 503,
         }
         return self._json(statuses.get(code, 502), {"error": code})
 
