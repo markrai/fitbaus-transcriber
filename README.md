@@ -8,7 +8,30 @@ FitBaus audiobook playback does not require this service. Transcription is an op
 
 The foundation, Audiobookshelf source adapter, and CPU speech recognition engine are under development. An operator can now transcribe a bounded audiobook window locally using the CLI. The operator CLI now supports durable job submission, execution and persistent transcript caching. The asynchronous REST API now accepts bounded transcription jobs, reports status and serves completed transcript windows. Versioned Linux AMD64 container publishing is configured for GitHub releases. The first public image requires a published release and successful publishing workflow.
 
-## Install a published container image
+## Guided installation (recommended)
+
+Once a release containing the installer has been published and its public image is available, run the following on the Linux AMD64 Docker host in a new directory. Replace the illustrative tag with an available release. Review the downloaded script before running it.
+
+```sh
+mkdir -p fitbaus-transcriber
+cd fitbaus-transcriber
+VERSION=v0.1.0
+curl -fsSLo install.sh "https://raw.githubusercontent.com/markrai/fitbaus-transcriber/$VERSION/install.sh"
+bash install.sh install "$VERSION"
+```
+
+The wizard asks for the Audiobookshelf URL and the private LAN bind address/port, creates a random operator credential, resolves the published image to a digest, validates configuration, starts the service and displays the pairing code. An optional sign-in check verifies account access; neither the password nor source credential is saved. Tiny is ready without a separate model download. Docker Compose v2, Bash, curl, OpenSSL, flock and tar are required on the host; no local Python or Git checkout is needed.
+
+```sh
+bash install.sh status
+bash install.sh pair
+bash install.sh backup
+bash install.sh upgrade v0.2.0
+```
+
+Use an actual newer published version for upgrade. The managed project identity stays fixed; upgrade takes a private cold backup before replacing the service, and preserves the volume, settings and pairing. Restart requires reauthorization of unfinished background jobs. See [guided installation and maintenance](docs/INSTALLATION.md) for all commands, recovery, and existing installations.
+
+## Manual installation of a published container image
 
 Published releases are distributed through [GitHub Container Registry](https://github.com/markrai/fitbaus-transcriber/pkgs/container/fitbaus-transcriber). This path requires Docker with Compose v2 on Linux AMD64, not a local Python environment, Git checkout or Docker build. ARM64 is not yet qualified.
 
@@ -59,7 +82,7 @@ docker compose exec transcriber python -m transcriber cancel-model-download smal
 
 The start command admits a download and returns immediately. Use `models` to inspect progress and the terminal result; a second model cannot start until the first has finished. Downloads use fixed upstream revisions, verify file sizes and upstream SHA-256 (large files) or Git blob hashes, and atomically install into the data volume. Interrupted or cancelled staging is discarded; explicitly start again to retry. There is no automatic retry or partial-download resumption. The default optional-model quota is 1024 MiB (`TRANSCRIBER_MODEL_QUOTA_MIB`, accepted range 128–4096); at least 256 MiB of free disk is reserved during downloads. A 30-minute deadline bounds each download. Tiny stays the active inference model. Installed optional models are automatically queued for hardware qualification, but are not automatically activated for live inference or deleted. A download can share the server's CPU, disk and network with playback, so avoid large downloads during latency-sensitive reading.
 
-Paired clients can inspect inventory but cannot initiate or cancel downloads yet. The local operator command uses the existing operator token internally over loopback. Do not copy that token to ordinary clients. See [model management API](docs/MODEL-MANAGEMENT.md).
+Paired clients can inspect inventory and initiate or cancel bounded optional model downloads. The local operator command uses the existing operator token internally over loopback. Do not copy that token to ordinary clients. See [model management API](docs/MODEL-MANAGEMENT.md).
 
 ### Benchmark installed models
 
