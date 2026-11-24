@@ -11,6 +11,7 @@ from .audiobookshelf import Audiobookshelf, SourceError, valid_bearer
 
 from .contract import AudioIdentity, SCHEMA, MAX_WINDOW_MS
 from .dispatcher import Dispatcher
+from .background import Background, BackgroundStore
 from .jobs import JobStore, QueueError, MAX_ATTEMPTS
 from .runner import JobRunner
 from .engine import ENGINE_ID, WhisperCpuEngine
@@ -31,6 +32,7 @@ class Service(ThreadingHTTPServer):
         self.model_available = model_available or (lambda: model_present(model_directory(config.data_dir)))
         self.downloads = ModelDownloads(config.data_dir, config.model_quota_mib)
         self.dispatcher = None
+        self.background = None
         self.runner = runner
         if self.source is not None and self.runner is None:
             self.runner = JobRunner(JobStore(config.data_dir / "queue", config.queue),
@@ -44,7 +46,8 @@ class Service(ThreadingHTTPServer):
                 if str(error) != "worker_busy":
                     super().server_close()
                     raise
-            self.dispatcher = Dispatcher(self.runner, config.queue.max_active)
+            self.background = Background(self.runner, BackgroundStore(config.data_dir / "background"))
+            self.dispatcher = Dispatcher(self.runner, config.queue.max_active, background=self.background)
 
     def readiness(self):
         if self.source is None:
@@ -169,6 +172,7 @@ class Handler(BaseHTTPRequestHandler):
                 "model_qualification_api": True,
                 "model_quota_mib": self.server.config.model_quota_mib,
                 "job_api": True,
+                "background_job_api": True,
                 "running_job_cancel": True,
                 "inference_timeout_seconds": self.server.config.engine.inference_timeout,
                 "pairing_api": True,
@@ -180,6 +184,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, qualification_inventory(self.server.config.data_dir, self.server.config.engine))
         if self.path == "/v1/models":
             return self._json(200, {"models": self.server.downloads.inventory(), "quota_mib": self.server.config.model_quota_mib})
+        match = re.fullmatch(r"/v1/background/([0-9a-f]{64})", self.path)
+        if match:
+            return self._background_request("status", match.group(1))
+        match = re.fullmatch(r"/v1/items/([A-Za-z0-9_-]{1,128})/background", self.path)
+        if match:
+            return self._background_request("list", match.group(1))
         match = re.fullmatch(r"/v1/items/([A-Za-z0-9_-]{1,128})/manifest", self.path)
         if match:
             return self._manifest(match.group(1))
@@ -209,6 +219,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._pairing_request()
         if not self._authorized():
             return self._json(401, {"error": "unauthorized"})
+        if self.path == "/v1/background":
+            return self._background_request("submit")
+        match = re.fullmatch(r"/v1/background/([0-9a-f]{64})/(resume|pause|cancel|discard)", self.path)
+        if match:
+            return self._background_request(match.group(2), match.group(1))
         if self.path != "/v1/jobs":
             return self._json(404, {"error": "not_found"})
         token = self._source_token()
@@ -243,6 +258,41 @@ class Handler(BaseHTTPRequestHandler):
         if not match:
             return self._json(404, {"error": "not_found"})
         return self._job_request(match.group(1), "cancel")
+
+    def _background_request(self, action, identifier=None):
+        token = self._source_token()
+        if token is None:
+            return
+        background = self.server.background
+        if background is None:
+            return self._json(503, {"error": "worker_unavailable"})
+        try:
+            if action == "submit":
+                body = self._body()
+                required = {"source_id", "item_id", "audio_revision", "model"}
+                if not isinstance(body, dict) or not required <= body.keys() or body.keys() - required - {"start_ms"}:
+                    raise ValueError("invalid_request")
+                identity = AudioIdentity(body["source_id"], body["item_id"], body["audio_revision"])
+                result = background.submit(identity, body["model"], token, body.get("start_ms", 0))
+            elif action == "list":
+                manifest = background.runner.source.manifest(identifier, token)
+                result = {"jobs": [background.status(job) for job in background.store.for_item(
+                    manifest.identity.source_id, manifest.identity.item_id)]}
+            elif action == "status":
+                job = background.store.get(identifier)
+                background.authorize(job, token, exact=False)
+                result = background.status(job)
+            else:
+                result = background.action(identifier, token, action)
+            self.server.dispatcher.wake()
+            return self._json(202 if action in ("submit", "resume") and
+                              result.get("state") in ("queued", "processing") else 200, result)
+        except TimeoutError:
+            return self._json(408, {"error": "request_timeout"})
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            return self._json(400, {"error": "invalid_request"})
+        except (SourceError, QueueError) as error:
+            return self._job_error(error)
 
     def _body(self):
         if self.headers.get_all("Transfer-Encoding"):
@@ -308,6 +358,10 @@ class Handler(BaseHTTPRequestHandler):
             "stale_revision": 409, "profile_changed": 409, "job_not_ready": 409,
             "job_not_cancellable": 409, "queue_full": 429, "worker_busy": 503,
             "worker_unavailable": 503, "queue_storage_error": 503,
+            "background_not_found": 404, "background_full": 429, "background_storage_full": 409,
+            "background_not_discardable": 409, "background_busy": 409,
+            "background_storage_error": 503, "model_not_prepared": 409,
+            "model_not_qualified": 409, "resource_unavailable": 503,
         }
         return self._json(statuses.get(code, 502), {"error": code})
 
