@@ -65,7 +65,7 @@ class SectionPlanRequest:
                 "reason": reason, "transcript_digest": digest}
 
 
-def _ready_window(runner, identity, start, end):
+def ready_window(runner, identity, start, end):
     spec = JobSpec(identity, start, end, engine_profile(runner.engine.config))
     job = runner.prepared.find_prepared(spec, runner.engine.config) if runner.prepared is not None else None
     if job is None:
@@ -102,7 +102,7 @@ def section_plan(request, token, runner, guard=None):
     for start, end in windows:
         if guard is not None and not guard():
             raise SourceError("unauthorized")
-        snapshot = _ready_window(runner, request.identity, start, end)
+        snapshot = ready_window(runner, request.identity, start, end)
         if snapshot is None:
             authorize_interval(request, token, runner, guard)
             return request.response(request.boundaries, "missing_transcript")

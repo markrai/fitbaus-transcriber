@@ -421,6 +421,104 @@ class SummaryApiTests(unittest.TestCase):
         self.assertEqual(self.calls[0][1], self.calls[1][1])
         self.assertEqual(self.calls[1][1], "heard")
 
+    def cumulative(self, position=735000, **kwargs):
+        return self.request(self.recap_body(position), path="/v1/cumulative-recaps", **kwargs)
+
+    def test_cumulative_hierarchy_is_bounded_and_reuses_cached_prefix(self):
+        self.prepare([
+            (0, 300000, [Cue(1000, 2000, "beginning")]),
+            (300000, 600000, [Cue(301000, 302000, "middle")]),
+            (600000, 750000, [Cue(601000, 602000, "recent"),
+                               Cue(730000, 740000, "straddling cutoff"),
+                               Cue(745000, 746000, "unheard")]),
+        ])
+        for index in (1, 2, 3):
+            code, result = self.cumulative()
+            self.assertEqual(code, 200 if index == 3 else 202)
+            self.assertEqual(result["state"], "ready" if index == 3 else "pending_summary")
+            self.assertEqual(result["completed_nodes"], index)
+            self.assertEqual(result["total_nodes"], 3)
+            self.assertEqual(result["schema"], "fitbaus.cumulative-recap/v1")
+            self.assertEqual(result["algorithm"], "cumulative-v1")
+            self.assertEqual((result["start_ms"], result["end_ms"], result["position_ms"]), (0, 735000, 735000))
+            self.assertEqual(len(self.calls), index)
+        self.assertEqual(self.calls[0][1], "beginning\nmiddle")
+        self.assertEqual(self.calls[1][1], "recent")
+        self.assertEqual(self.calls[2][1], "Concise summary.\n\nConcise summary.")
+        self.assertFalse(result["cache_hit"])
+        self.assertEqual(result["summary"], "Concise summary.")
+        self.assertTrue(self.cumulative()[1]["cache_hit"])
+        self.assertTrue(self.cumulative(600000)[1]["cache_hit"])
+        self.assertEqual(len(self.calls), 3)
+        self.assertEqual(self.transcriptions, [])
+        self.assertEqual(self.cumulative(user="denied")[0], 403)
+        self.source.identity = AudioIdentity("home", "book", "c" * 64)
+        self.assertEqual(self.cumulative()[0], 409)
+
+    def test_cumulative_missing_coverage_never_generates_or_schedules(self):
+        self.prepare([(0, 300000, [Cue(1000, 2000, "beginning")])])
+        code, result = self.cumulative()
+        self.assertEqual(code, 409)
+        self.assertEqual(result["state"], "missing_transcript")
+        self.assertEqual(result["missing_windows"], [300000, 600000])
+        self.assertEqual(result["missing_window_count"], 2)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.transcriptions, [])
+
+    def test_cumulative_zero_silence_and_strict_request(self):
+        code, result = self.cumulative(0)
+        self.assertEqual(code, 200)
+        self.assertEqual(result["state"], "empty")
+        self.assertEqual(result["total_nodes"], 0)
+        self.assertIsNone(result["summary"])
+        self.prepare([(0, 300000, [Cue(1000, 2000, "not wholly contained")])])
+        self.assertEqual(self.cumulative(1500)[1]["state"], "empty")
+        for position in (-1, True, "1000", 750001, 86400001):
+            self.assertEqual(self.cumulative(position)[0], 400)
+        for extra in ({"retry": True}, {"start_ms": 0}, {"prompt": "override"}):
+            self.assertEqual(self.request(self.recap_body(0, **extra), path="/v1/cumulative-recaps")[0], 400)
+        self.assertEqual(self.cumulative(0, operator=None)[0], 401)
+        self.assertEqual(self.cumulative(0, user=None)[0], 401)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.transcriptions, [])
+        caps = self.request(path="/v1/capabilities", method="GET")[1]
+        self.assertTrue(caps["cumulative_recap_api"])
+        self.assertEqual(caps["cumulative_recap_max_position_ms"], 86400000)
+
+    def test_cumulative_provider_failure_preserves_completed_nodes(self):
+        self.prepare([
+            (0, 300000, [Cue(1000, 2000, "beginning")]),
+            (300000, 600000, []),
+            (600000, 750000, [Cue(601000, 602000, "recent")]),
+        ])
+        self.assertEqual(self.cumulative()[0], 202)
+        self.failure = "provider_unavailable"
+        self.assertEqual(self.cumulative()[0], 502)
+        self.failure = None
+        self.server.summary_cache = SummaryCache(self.server.config.data_dir / "summaries")
+        self.assertEqual(self.cumulative()[1]["completed_nodes"], 2)
+        self.assertEqual(self.cumulative()[0], 200)
+        self.assertEqual([text for _, text in self.calls], [
+            "beginning", "recent", "recent", "Concise summary.\n\nConcise summary."])
+
+    def test_cumulative_revocation_prevents_cache_commit(self):
+        self.prepare([(0, 300000, [Cue(1000, 2000, "first")])])
+        _, device = self.server.pairing.redeem(self.server.pairing.issue())
+        self.release.clear()
+        results = []
+        worker = threading.Thread(target=lambda: results.append(self.cumulative(10000, operator=device["token"])))
+        worker.start()
+        try:
+            self.assertTrue(self.entered.wait(3))
+            self.assertEqual(self.request(self.body(0, 10000)), (429, {"error": "summary_busy"}))
+            self.server.pairing.revoke_all()
+        finally:
+            self.release.set()
+            worker.join(timeout=7)
+        self.assertEqual(results, [(401, {"error": "unauthorized"})])
+        self.assertFalse(self.cumulative(10000)[1]["cache_hit"])
+        self.assertEqual(len(self.calls), 2)
+
     def test_window_math_and_capability(self):
         request = SummaryRequest.parse(self.body(299999, 750000))
         self.assertEqual(request.windows(750000), [(0, 300000), (300000, 600000), (600000, 750000)])
