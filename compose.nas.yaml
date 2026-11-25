@@ -20,6 +20,7 @@ services:
       TRANSCRIBER_SUMMARY_API_KEY: ""
       TRANSCRIBER_SUMMARY_ALLOW_HTTP: "false"
       TRANSCRIBER_SUMMARY_TIMEOUT: 60
+      TRANSCRIBER_SUMMARY_CACHE_EPOCH: "1"
     ports:
       - "127.0.0.1:8765:8765"
     volumes:

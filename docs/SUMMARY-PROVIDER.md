@@ -11,6 +11,7 @@ Summarization is disabled by default. To opt in, configure these variables on th
 | TRANSCRIBER_SUMMARY_API_KEY | Optional provider bearer credential; keep private |
 | TRANSCRIBER_SUMMARY_ALLOW_HTTP | false by default; true explicitly permits unencrypted HTTP |
 | TRANSCRIBER_SUMMARY_TIMEOUT | 5–120 seconds; default 60 |
+| TRANSCRIBER_SUMMARY_CACHE_EPOCH | Cache namespace; default 1. Change after replacing model weights under the same name |
 
 Example for a separately deployed Ollama instance reachable from the transcriber container on a trusted private network:
 
@@ -26,4 +27,4 @@ The authenticated GET /v1/capabilities response adds an optional summary_provide
 
 The internal adapter sends a nonstreaming POST to /v1/chat/completions with system and user messages, a 1024-token output request, and only the provider bearer if configured. It disables redirects and environment proxies, verifies normal HTTPS certificates, bounds input (64 KiB UTF-8), response (128 KiB), and returned text (8000 characters), and rejects truncated or tool-call completions. Network errors are sanitized. Timeout applies to socket operations with an elapsed-time check during response reads; it is not a strict process deadline. No retries, tools, model listing or provider probes are performed.
 
-Phase 4A exposes the authenticated [summary generation API](SUMMARY-API.md). Requests only send validated, fully contained transcript cues to the configured provider. There is no automatic summarization or persistent summary cache yet. Other OpenAI-compatible implementations (including LOBO if its endpoint satisfies this contract) require interoperability qualification.
+Phase 4A exposes the authenticated [summary generation API](SUMMARY-API.md). Requests only send validated, fully contained transcript cues to the configured provider. Phase 4B adds persistent caching. There is no automatic summarization or Trainer summary control yet. Other OpenAI-compatible implementations (including LOBO if its endpoint satisfies this contract) require interoperability qualification.
