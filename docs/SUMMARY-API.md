@@ -1,4 +1,4 @@
-# Summary generation API (Phases 4A–4B)
+# Summary and recap generation API
 
 FitBaus Transcriber owns summary generation; Trainer supplies an audiobook identity and section interval, never raw text, a prompt, provider URL or credentials. No Trainer change is required.
 
@@ -10,7 +10,7 @@ FitBaus Transcriber owns summary generation; Trainer supplies an audiobook ident
 {"source_id":"home-library","item_id":"book-1","audio_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","start_ms":180000,"end_ms":540000}
 ```
 
-The five fields are required; optional boolean `retry` defaults false and applies only to failed transcript windows. Timestamps are book-relative integer milliseconds, half-open, positive length, at most ten minutes, within the current manifest. Only section summaries are supported. Trainer supplies chapter-aware boundaries; the server does not independently enforce chapter boundaries.
+The five fields are required; optional boolean `retry` defaults false and applies only to failed transcript windows. Timestamps are book-relative integer milliseconds, half-open, positive length, at most ten minutes, within the current manifest. This endpoint produces whole-section summaries; the separate recap endpoint below restricts context to the requested playback position. Trainer supplies chapter-aware boundaries; the server does not independently enforce chapter boundaries.
 
 The source manifest is checked against the requested identity. All intersecting book-aligned five-minute windows are resolved through the existing runner, preferring prepared transcripts then cached live results. Missing windows are scheduled through the existing bounded dispatcher and device guard. No new audio decoder or Whisper worker is introduced. Incomplete coverage never reaches the provider.
 
@@ -42,3 +42,21 @@ SQLite transactions and least-recently-used eviction bound the cache to 2,048 ro
 ## Transcript-informed section planning (Phase 6A)
 
 The companion advertises `section_plan_api: true`. See [section planning contract](SECTION-PLAN.md). This optional read-only endpoint refines nominal cut points using verified existing narration, without an LLM request or scheduling transcription. The summary API and cache identity are unchanged: summaries use their exact requested interval.
+
+## Recent-listening recap (Phase 7A)
+
+`POST /v1/recaps` requires the same existing device/operator and Audiobookshelf credentials, provider configuration and source authorization as the summary endpoint. `GET /v1/capabilities` advertises `recap_api: true` independently of provider configuration.
+
+```json
+{"source_id":"home-library","item_id":"book-1","audio_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","position_ms":735000}
+```
+
+The four fields are required; optional boolean `retry` applies only to failed transcript windows. Position is an exact book-relative integer millisecond timestamp from zero through the current manifest duration, inclusive. No caller-supplied interval or prompt is accepted. The service derives the half-open range `[max(0, position_ms - 600000), position_ms)`. This is a recent ten-minute recap, not a book-to-date summary or a record of which portions the user actually listened to after seeking.
+
+Responses follow the summary state machine (202 pending, 200 ready or empty) with `schema: fitbaus.recap/v1`, echoed `position_ms`, and derived `start_ms` and `end_ms`. Ready/empty responses use `prompt_version: recap-v1`. Position zero is a valid empty response after authorization, with no transcription or provider call. As with summaries, all intersecting transcript windows must be verified before generation. Even if the final aligned window contains later narration, only cues wholly contained inside the derived recap interval are sent to the model. Cues crossing either edge are excluded because word-level timing is unavailable.
+
+The recap prompt asks for context useful when resuming, prohibits outside knowledge and predictions, and uses the narration language. This prevents later transcript text from entering provider input, but cannot guarantee that a model never hallucinates or recalls later events from pretraining. The server trusts the authorized client's reported position; it does not assert that every prior segment was heard. Trainer must capture the real playback position on explicit user request and reject stale responses after seeking.
+
+The same bounded persistent cache and shared single-request admission slot are used. Recap keys are separate from whole-section summaries by prompt/version and exact interval, and recap digests incorporate validated profile, aligned window start and contained cue timestamps/text only. Changes limited to later cue text do not invalidate an otherwise identical recap snapshot, but profile changes do. Exact positions are not rounded, so frequent distinct requests may generate distinct cache entries. No automatic generation or new worker is added.
+
+Trainer integration is Phase 7B. Older Trainer clients and existing summary/section-plan requests are unchanged.

@@ -20,7 +20,7 @@ from .model_downloads import ModelDownloads, DownloadError
 from .qualification import inventory as qualification_inventory
 from .automatic_qualification import AutomaticQualification
 from .summary_provider import OpenAIChatProvider, SummaryProviderError, summary_capability
-from .summaries import SummaryError, SummaryRequest, generate_summary
+from .summaries import RecapRequest, SummaryError, SummaryRequest, generate_summary
 from .summary_cache import SummaryCache, SummaryCacheError
 from .section_plan import SectionPlanRequest, section_plan
 
@@ -216,6 +216,7 @@ class Handler(BaseHTTPRequestHandler):
                 "pairing_api": True,
                 "summary_provider": summary_capability(self.server.config.summary_provider),
                 "summary_api": True,
+                "recap_api": True,
                 "section_plan_api": True,
                 "max_window_ms": MAX_WINDOW_MS,
                 "source_configured": self.server.source is not None,
@@ -280,6 +281,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._section_plan_request()
         if self.path == "/v1/summaries":
             return self._summary_request()
+        if self.path == "/v1/recaps":
+            return self._summary_request(recap=True)
         if self.path == "/v1/background":
             return self._background_request("submit")
         match = re.fullmatch(r"/v1/background/([0-9a-f]{64})/(resume|pause|cancel|discard|reauthorize)", self.path)
@@ -348,7 +351,7 @@ class Handler(BaseHTTPRequestHandler):
             service.section_plan_slot.release()
         return self._json(200, result)
 
-    def _summary_request(self):
+    def _summary_request(self, recap=False):
         token = self._source_token()
         if token is None:
             return
@@ -358,7 +361,8 @@ class Handler(BaseHTTPRequestHandler):
         if service.runner is None or service.dispatcher is None:
             return self._json(503, {"error": "worker_unavailable"})
         try:
-            request = SummaryRequest.parse(self._body())
+            request_type = RecapRequest if recap else SummaryRequest
+            request = request_type.parse(self._body())
         except TimeoutError:
             return self._json(408, {"error": "request_timeout"})
         except (ValueError, TypeError, UnicodeError, RecursionError):
