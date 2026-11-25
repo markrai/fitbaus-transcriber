@@ -28,6 +28,17 @@ class SummaryProviderTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 Config.from_env({**env, key: ""})
 
+    def test_custom_ca_is_https_only_and_validated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            invalid = Path(directory) / "invalid.pem"
+            invalid.write_text("not a certificate")
+            for url, path in (("https://host/v1", str(invalid)),
+                              ("https://host/v1", "relative.pem"),
+                              ("https://host/v1", str(invalid) + ".missing"),
+                              ("http://host/v1", str(invalid))):
+                with self.subTest(url=url, path=path), self.assertRaises(ValueError):
+                    SummaryProviderConfig(url, "model", allow_http=True, ca_file=path)
+
     def test_rejects_unsafe_configuration(self):
         for url in ("http://host/v1", "https://user:secret@host/v1", "https://host/v1?key=x",
                     "https://host/v1#fragment", "https://host/v1/chat/completions", "https://host/../v1"):
@@ -61,8 +72,11 @@ class TransportTests(unittest.TestCase):
                 self.wfile.write(owner.reply)
 
             def do_GET(self):
-                owner.requests.append(("redirect", {}, {}))
-                self.send_error(500)
+                owner.requests.append((self.path, dict(self.headers), {}))
+                self.send_response(owner.status)
+                self.send_header("Content-Length", str(len(owner.reply)))
+                self.end_headers()
+                self.wfile.write(owner.reply)
 
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -84,6 +98,18 @@ class TransportTests(unittest.TestCase):
         self.assertFalse(body["stream"])
         self.assertEqual(body["messages"], [{"role": "system", "content": "System"}, {"role": "user", "content": "Narration"}])
         self.assertNotIn("X-Audiobookshelf-Token", headers)
+
+    def test_models_uses_same_transport_and_returns_only_identifiers(self):
+        self.reply = json.dumps({"data": [{"id": "lobo-nano", "secret": "private"},
+                                          {"id": "other"}, {"id": "lobo-nano"}]}).encode()
+        self.assertEqual(self.provider.models(), ["lobo-nano", "other"])
+        path, headers, _ = self.requests[0]
+        self.assertEqual(path, "/v1/models")
+        self.assertEqual(headers["Authorization"], "Bearer provider-key")
+        for reply in (b"not json", b'{"data":{}}', b'{"data":[{"id":"bad model"}]}'):
+            self.reply = reply
+            with self.assertRaisesRegex(SummaryProviderError, "invalid_response"):
+                self.provider.models()
 
     def test_redirect_and_upstream_errors_are_sanitized(self):
         self.reply = b"provider-key private narration"
@@ -133,3 +159,45 @@ class CapabilityTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)
+
+class AdminProbeTests(unittest.TestCase):
+    def test_admin_routes_do_not_grant_paired_devices_provider_administration(self):
+        from http.client import HTTPConnection
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config("a" * 64, "127.0.0.1", 8765, Path(directory),
+                            summary_provider=SummaryProviderConfig("https://provider.example/v1", "model", "secret"))
+            with Service(("127.0.0.1", 0), config) as server:
+                server.summary_provider = Mock()
+                server.summary_provider.models.return_value = ["model"]
+                server.summary_provider.complete.return_value = "Synthetic summary"
+                server.pairing.authorized = lambda token: token == "paired"
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                def call(method, path, token):
+                    conn = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+                    try:
+                        conn.request(method, path, headers={"Authorization": "Bearer " + token})
+                        response = conn.getresponse()
+                        return response.status, json.loads(response.read())
+                    finally:
+                        conn.close()
+                try:
+                    root = "/v1/admin/summary-provider"
+                    for method, path in (("GET", root), ("POST", root + "/models"), ("POST", root + "/test")):
+                        self.assertEqual(call(method, path, "paired")[0], 401)
+                    server.summary_provider.models.assert_not_called()
+                    server.summary_provider.complete.assert_not_called()
+                    status, data = call("GET", root, config.token)
+                    self.assertEqual(status, 200)
+                    self.assertTrue(data["has_api_key"])
+                    self.assertNotIn("secret", json.dumps(data))
+                    self.assertEqual(call("POST", root + "/models", config.token), (200, {"models": ["model"]}))
+                    status, data = call("POST", root + "/test", config.token)
+                    self.assertEqual(status, 200)
+                    self.assertTrue(data["ok"])
+                    self.assertNotIn("Synthetic summary", json.dumps(data))
+                    server.summary_provider.complete.assert_called_once()
+                finally:
+                    server.shutdown()
+                    thread.join(timeout=5)

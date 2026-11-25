@@ -4,6 +4,7 @@ import json
 import threading
 import re
 import sqlite3
+import time
 
 from .pairing import Pairing, TTL_SECONDS
 
@@ -217,6 +218,7 @@ class Handler(BaseHTTPRequestHandler):
                 "pairing_api": True,
                 "summary_provider": summary_capability(self.server.config.summary_provider),
                 "summary_api": True,
+                "summary_provider_admin_probe_api": True,
                 "recap_api": True,
                 "cumulative_recap_api": True,
                 "cumulative_recap_max_position_ms": MAX_POSITION_MS,
@@ -225,6 +227,16 @@ class Handler(BaseHTTPRequestHandler):
                 "source_configured": self.server.source is not None,
                 "source_id": self.server.config.source.source_id if self.server.config.source else None,
             })
+        if self.path == "/v1/admin/summary-provider":
+            if not self._summary_admin_authorized():
+                return self._json(401, {"error": "unauthorized"})
+            config = self.server.config.summary_provider
+            return self._json(200, {"configured": config is not None,
+                "base_url": config.base_url if config else None,
+                "model": config.model if config else None,
+                "has_api_key": bool(config and config.api_key),
+                "custom_ca": bool(config and config.ca_file),
+                "allow_http": bool(config and config.allow_http)})
         if self.path == "/v1/qualification":
             result = (self.server.qualification.inventory() if self.server.qualification is not None else
                       qualification_inventory(self.server.config.data_dir, self.server.config.engine))
@@ -280,6 +292,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._pairing_request()
         if not self._authorized():
             return self._json(401, {"error": "unauthorized"})
+        if self.path in ("/v1/admin/summary-provider/models", "/v1/admin/summary-provider/test"):
+            return self._summary_admin_probe(self.path.endswith("/models"))
         if self.path == "/v1/section-plan":
             return self._section_plan_request()
         if self.path == "/v1/summaries":
@@ -355,6 +369,37 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             service.section_plan_slot.release()
         return self._json(200, result)
+
+    def _summary_admin_authorized(self):
+        return self.client_address[0] in ("127.0.0.1", "::1") and self._operator_authorized()
+
+    def _summary_admin_probe(self, models):
+        if not self._summary_admin_authorized():
+            return self._json(401, {"error": "unauthorized"})
+        service = self.server
+        if service.summary_provider is None:
+            return self._json(503, {"error": "summary_provider_not_configured"})
+        if not service.summary_slot.acquire(blocking=False):
+            return self._json(429, {"error": "summary_busy"})
+        try:
+            start = time.monotonic()
+            if models:
+                result = {"models": service.summary_provider.models()}
+            else:
+                service.summary_provider.complete("Summarize the supplied text in one sentence.",
+                    "Regular aerobic exercise improves cardiovascular fitness.")
+                result = {"ok": True, "model": service.config.summary_provider.model,
+                          "elapsed_ms": round((time.monotonic() - start) * 1000)}
+            return self._json(200, result)
+        except SummaryProviderError as error:
+            code = str(error)
+            if code not in ("provider_authentication", "provider_rate_limited", "provider_http_error",
+                            "provider_unavailable", "provider_timeout", "response_too_large",
+                            "invalid_response", "invalid_completion"):
+                code = "provider_unavailable"
+            return self._json(504 if code == "provider_timeout" else 502, {"error": code})
+        finally:
+            service.summary_slot.release()
 
     def _summary_request(self, recap=False, cumulative=False):
         token = self._source_token()
