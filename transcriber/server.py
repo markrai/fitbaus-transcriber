@@ -22,6 +22,7 @@ from .automatic_qualification import AutomaticQualification
 from .summary_provider import OpenAIChatProvider, SummaryProviderError, summary_capability
 from .summaries import SummaryError, SummaryRequest, generate_summary
 from .summary_cache import SummaryCache, SummaryCacheError
+from .section_plan import SectionPlanRequest, section_plan
 
 
 class Service(ThreadingHTTPServer):
@@ -34,6 +35,7 @@ class Service(ThreadingHTTPServer):
         self.source = Audiobookshelf(config.source) if config.source else None
         self.slots = threading.BoundedSemaphore(8)
         self.summary_slot = threading.BoundedSemaphore(1)
+        self.section_plan_slot = threading.BoundedSemaphore(1)
         self.summary_provider = OpenAIChatProvider(config.summary_provider) if config.summary_provider else None
         self.summary_cache = SummaryCache(config.data_dir / "summaries")
         self.model_available = model_available or (lambda: model_present(model_directory(config.data_dir)))
@@ -214,6 +216,7 @@ class Handler(BaseHTTPRequestHandler):
                 "pairing_api": True,
                 "summary_provider": summary_capability(self.server.config.summary_provider),
                 "summary_api": True,
+                "section_plan_api": True,
                 "max_window_ms": MAX_WINDOW_MS,
                 "source_configured": self.server.source is not None,
                 "source_id": self.server.config.source.source_id if self.server.config.source else None,
@@ -273,6 +276,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._pairing_request()
         if not self._authorized():
             return self._json(401, {"error": "unauthorized"})
+        if self.path == "/v1/section-plan":
+            return self._section_plan_request()
         if self.path == "/v1/summaries":
             return self._summary_request()
         if self.path == "/v1/background":
@@ -315,6 +320,33 @@ class Handler(BaseHTTPRequestHandler):
         if not match:
             return self._json(404, {"error": "not_found"})
         return self._job_request(match.group(1), "cancel")
+
+    def _section_plan_request(self):
+        token = self._source_token()
+        if token is None:
+            return
+        service = self.server
+        if service.runner is None:
+            return self._json(503, {"error": "worker_unavailable"})
+        try:
+            request = SectionPlanRequest.parse(self._body())
+        except TimeoutError:
+            return self._json(408, {"error": "request_timeout"})
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            return self._json(400, {"error": "invalid_request"})
+        if not service.section_plan_slot.acquire(blocking=False):
+            return self._json(429, {"error": "section_plan_busy"})
+        try:
+            result = section_plan(request, token, service.runner, self._device_guard())
+        except (SourceError, QueueError) as error:
+            return self._job_error(error)
+        except SummaryError as error:
+            return self._json(error.status, {"error": error.code})
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            return self._json(400, {"error": "invalid_request"})
+        finally:
+            service.section_plan_slot.release()
+        return self._json(200, result)
 
     def _summary_request(self):
         token = self._source_token()
