@@ -23,6 +23,7 @@ from .summary_provider import OpenAIChatProvider, SummaryProviderError, summary_
 from .summaries import RecapRequest, SummaryError, SummaryRequest, generate_summary
 from .summary_cache import SummaryCache, SummaryCacheError
 from .section_plan import SectionPlanRequest, section_plan
+from .cumulative_recap import CumulativeRecapRequest, cumulative_recap, MAX_POSITION_MS
 
 
 class Service(ThreadingHTTPServer):
@@ -217,6 +218,8 @@ class Handler(BaseHTTPRequestHandler):
                 "summary_provider": summary_capability(self.server.config.summary_provider),
                 "summary_api": True,
                 "recap_api": True,
+                "cumulative_recap_api": True,
+                "cumulative_recap_max_position_ms": MAX_POSITION_MS,
                 "section_plan_api": True,
                 "max_window_ms": MAX_WINDOW_MS,
                 "source_configured": self.server.source is not None,
@@ -283,6 +286,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._summary_request()
         if self.path == "/v1/recaps":
             return self._summary_request(recap=True)
+        if self.path == "/v1/cumulative-recaps":
+            return self._summary_request(cumulative=True)
         if self.path == "/v1/background":
             return self._background_request("submit")
         match = re.fullmatch(r"/v1/background/([0-9a-f]{64})/(resume|pause|cancel|discard|reauthorize)", self.path)
@@ -351,7 +356,7 @@ class Handler(BaseHTTPRequestHandler):
             service.section_plan_slot.release()
         return self._json(200, result)
 
-    def _summary_request(self, recap=False):
+    def _summary_request(self, recap=False, cumulative=False):
         token = self._source_token()
         if token is None:
             return
@@ -361,7 +366,7 @@ class Handler(BaseHTTPRequestHandler):
         if service.runner is None or service.dispatcher is None:
             return self._json(503, {"error": "worker_unavailable"})
         try:
-            request_type = RecapRequest if recap else SummaryRequest
+            request_type = CumulativeRecapRequest if cumulative else RecapRequest if recap else SummaryRequest
             request = request_type.parse(self._body())
         except TimeoutError:
             return self._json(408, {"error": "request_timeout"})
@@ -370,10 +375,16 @@ class Handler(BaseHTTPRequestHandler):
         if not service.summary_slot.acquire(blocking=False):
             return self._json(429, {"error": "summary_busy"})
         try:
-            result = generate_summary(request, token, service.runner, service.dispatcher,
-                                      service.summary_provider, service.config.summary_provider,
-                                      service.readiness, self._device_guard(), cache=service.summary_cache,
-                                      source_url=service.config.source.base_url)
+            if cumulative:
+                result = cumulative_recap(request, token, service.runner,
+                                          service.summary_provider, service.config.summary_provider,
+                                          self._device_guard(), cache=service.summary_cache,
+                                          source_url=service.config.source.base_url)
+            else:
+                result = generate_summary(request, token, service.runner, service.dispatcher,
+                                          service.summary_provider, service.config.summary_provider,
+                                          service.readiness, self._device_guard(), cache=service.summary_cache,
+                                          source_url=service.config.source.base_url)
         except (SourceError, QueueError) as error:
             return self._job_error(error)
         except SummaryError as error:
@@ -391,7 +402,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": "invalid_request"})
         finally:
             service.summary_slot.release()
-        return self._json(202 if result["state"] == "pending_transcript" else 200, result)
+        status = 409 if result["state"] == "missing_transcript" else (
+            202 if result["state"] in ("pending_transcript", "pending_summary") else 200)
+        return self._json(status, result)
 
     def _background_request(self, action, identifier=None):
         token = self._source_token()
