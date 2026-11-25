@@ -65,7 +65,7 @@ Pin an image digest (`ghcr.io/markrai/fitbaus-transcriber@sha256:...`) for conte
 
 ## Optional audiobook summary provider
 
-The server can be configured with an OpenAI-compatible chat-completions endpoint for future audiobook summaries. It is disabled by default and independent of Whisper. See [summary provider configuration](docs/SUMMARY-PROVIDER.md) for local Ollama or other compatible endpoints, privacy, and current limitations. This foundation does not yet expose a summary generation API or submit audiobook text to a provider.
+The server can be configured with an OpenAI-compatible chat-completions endpoint for future audiobook summaries. It is disabled by default and independent of Whisper. See [summary provider configuration](docs/SUMMARY-PROVIDER.md) for local Ollama or other compatible endpoints, privacy, and current limitations. The authenticated [summary generation API](docs/SUMMARY-API.md) generates a summary only on an explicit request with current audiobook access. Persistent summary caching and Trainer integration are not yet included.
 
 ## Model policy
 

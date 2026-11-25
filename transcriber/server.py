@@ -19,7 +19,8 @@ from .model import DEFAULT_MODEL, model_directory, model_present
 from .model_downloads import ModelDownloads, DownloadError
 from .qualification import inventory as qualification_inventory
 from .automatic_qualification import AutomaticQualification
-from .summary_provider import summary_capability
+from .summary_provider import OpenAIChatProvider, SummaryProviderError, summary_capability
+from .summaries import SummaryError, SummaryRequest, generate_summary
 
 
 class Service(ThreadingHTTPServer):
@@ -31,6 +32,8 @@ class Service(ThreadingHTTPServer):
         self.pairing = Pairing(config.data_dir)
         self.source = Audiobookshelf(config.source) if config.source else None
         self.slots = threading.BoundedSemaphore(8)
+        self.summary_slot = threading.BoundedSemaphore(1)
+        self.summary_provider = OpenAIChatProvider(config.summary_provider) if config.summary_provider else None
         self.model_available = model_available or (lambda: model_present(model_directory(config.data_dir)))
         self.downloads = ModelDownloads(config.data_dir, config.model_quota_mib)
         self.dispatcher = None
@@ -208,6 +211,7 @@ class Handler(BaseHTTPRequestHandler):
                 "inference_timeout_seconds": self.server.config.engine.inference_timeout,
                 "pairing_api": True,
                 "summary_provider": summary_capability(self.server.config.summary_provider),
+                "summary_api": True,
                 "max_window_ms": MAX_WINDOW_MS,
                 "source_configured": self.server.source is not None,
                 "source_id": self.server.config.source.source_id if self.server.config.source else None,
@@ -267,6 +271,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._pairing_request()
         if not self._authorized():
             return self._json(401, {"error": "unauthorized"})
+        if self.path == "/v1/summaries":
+            return self._summary_request()
         if self.path == "/v1/background":
             return self._background_request("submit")
         match = re.fullmatch(r"/v1/background/([0-9a-f]{64})/(resume|pause|cancel|discard|reauthorize)", self.path)
@@ -307,6 +313,44 @@ class Handler(BaseHTTPRequestHandler):
         if not match:
             return self._json(404, {"error": "not_found"})
         return self._job_request(match.group(1), "cancel")
+
+    def _summary_request(self):
+        token = self._source_token()
+        if token is None:
+            return
+        service = self.server
+        if service.summary_provider is None:
+            return self._json(503, {"error": "summary_provider_not_configured"})
+        if service.runner is None or service.dispatcher is None:
+            return self._json(503, {"error": "worker_unavailable"})
+        try:
+            request = SummaryRequest.parse(self._body())
+        except TimeoutError:
+            return self._json(408, {"error": "request_timeout"})
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            return self._json(400, {"error": "invalid_request"})
+        if not service.summary_slot.acquire(blocking=False):
+            return self._json(429, {"error": "summary_busy"})
+        try:
+            result = generate_summary(request, token, service.runner, service.dispatcher,
+                                      service.summary_provider, service.config.summary_provider.model,
+                                      service.readiness, self._device_guard())
+        except (SourceError, QueueError) as error:
+            return self._job_error(error)
+        except SummaryError as error:
+            return self._json(error.status, {"error": error.code})
+        except SummaryProviderError as error:
+            code = str(error)
+            if code not in ("provider_authentication", "provider_rate_limited", "provider_http_error",
+                            "provider_unavailable", "provider_timeout", "response_too_large",
+                            "invalid_response", "invalid_completion"):
+                code = "provider_unavailable"
+            return self._json(504 if code == "provider_timeout" else 502, {"error": code})
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            return self._json(400, {"error": "invalid_request"})
+        finally:
+            service.summary_slot.release()
+        return self._json(202 if result["state"] == "pending_transcript" else 200, result)
 
     def _background_request(self, action, identifier=None):
         token = self._source_token()
