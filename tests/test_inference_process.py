@@ -67,6 +67,25 @@ print(json.dumps({"window": {"schema": "fitbaus.transcript/v1", **p["identity"],
         with self.assertRaisesRegex(QueueError, "result_limit"):
             self.run_code("print('x' * (1024 * 1024 + 1025))")
 
+    def test_structured_failure_preserves_only_validated_diagnostics(self):
+        for code in ("audio_decode_failed", "incomplete_decoded_audio", "model_load_failed",
+                     "model_text_limit", "inference_failed"):
+            response = {"error": code, "exception_type": "RuntimeError", "exit_status": 1}
+            with self.assertRaisesRegex(EngineError, code) as caught:
+                self.run_code("print(" + repr(json.dumps(response)) + ")")
+            self.assertEqual(caught.exception.exception_type, "RuntimeError")
+            self.assertEqual(caught.exception.exit_status, 1)
+        for response in (
+            {"error": "secret-token", "exception_type": None, "exit_status": None},
+            {"error": "inference_failed", "exception_type": "private message", "exit_status": None},
+            {"error": "inference_failed", "exception_type": None, "exit_status": True},
+        ):
+            with self.assertRaisesRegex(EngineError, "invalid_worker_result"):
+                self.run_code("print(" + repr(json.dumps(response)) + ")")
+        with self.assertRaisesRegex(EngineError, "worker_crashed") as caught:
+            self.run_code("import os; os._exit(7)")
+        self.assertEqual(caught.exception.exit_status, 7)
+
     def test_credentials_not_in_arguments_or_environment(self):
         code = """import json, os, sys
 p = json.load(sys.stdin)

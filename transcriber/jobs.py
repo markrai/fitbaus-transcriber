@@ -9,6 +9,7 @@ import sqlite3
 import time
 
 from .contract import AudioIdentity, MAX_TIME_MS, MAX_WINDOW_MS, TranscriptWindow
+from .diagnostics import ENGINE_FAILURES
 
 MAX_RESULT_BYTES = 1024 * 1024
 MAX_ATTEMPTS = 3
@@ -182,6 +183,19 @@ class JobStore:
                   spec.start_ms, spec.end_ms, spec.profile, time.time_ns()))
             return self._get(db, spec.id)
 
+    def requeue_failed(self, job_id):
+        with self._transaction() as db:
+            job = self._get(db, job_id)
+            if job.state != "failed":
+                return job
+            active = db.execute("SELECT count(*) FROM jobs WHERE state IN ('queued','running')").fetchone()[0]
+            if active >= self.limits.max_active:
+                raise QueueError("queue_full")
+            attempts = 0 if job.attempts >= MAX_ATTEMPTS else job.attempts
+            db.execute("UPDATE jobs SET state='queued',attempts=?,error=NULL,touched=? WHERE id=?",
+                       (attempts, time.time_ns(), job_id))
+            return self._get(db, job_id)
+
     def cancel(self, job_id):
         with self._transaction() as db:
             job = self._get(db, job_id)
@@ -208,8 +222,7 @@ class JobStore:
             return self._get(db, job_id)
 
     def fail(self, job_id, error):
-        if error not in ("source_failed", "engine_failed", "result_limit", "internal_error",
-                         "inference_timeout", "worker_crashed", "cancelled", "worker_unavailable", "invalid_worker_result", "resource_unavailable"):
+        if error not in ENGINE_FAILURES and error not in ("source_failed", "result_limit", "internal_error"):
             raise ValueError("Invalid failure classification")
         with self._transaction() as db:
             db.execute("UPDATE jobs SET state='failed',error=?,touched=? WHERE id=? AND state='running'",

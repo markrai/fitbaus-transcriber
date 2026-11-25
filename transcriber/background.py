@@ -13,6 +13,7 @@ import time
 from .audiobookshelf import SourceError, MAX_TRACK_BYTES
 from .contract import AudioIdentity, Cue, MAX_WINDOW_MS, SCHEMA, TranscriptWindow
 from .engine import EngineError, WhisperCpuEngine
+from .diagnostics import ENGINE_FAILURES, log_failure
 from .inference_process import supervised_window
 from .jobs import Job, JobSpec, MAX_RESULT_BYTES, QueueError
 from .model import model_directory, model_present, model_spec
@@ -449,6 +450,8 @@ class Background:
                 self.drop_spool()
 
     def step(self, job, token, control):
+        started = time.monotonic()
+        end = min(job.cursor_ms + MAX_WINDOW_MS, job.duration_ms)
         try:
             with self.runner.store.worker() as fd:
                 if control.cancelled():
@@ -456,7 +459,6 @@ class Background:
                 manifest = self.authorize(job, token)
                 self.check_model(job.model)
                 engine = WhisperCpuEngine(self.runner.directory, self.config, model_name=job.model)
-                end = min(job.cursor_ms + MAX_WINDOW_MS, job.duration_ms)
                 spool = self.prepare_spool(job, manifest, end, token) if self.execute is supervised_window else None
                 args = (self.runner.source, job.identity, token, self.runner.directory,
                         engine, job.cursor_ms, end, control.cancelled, fd)
@@ -488,12 +490,16 @@ class Background:
                             self.release(job.id)
                         self.drop_spool()
                     else:
+                        if isinstance(error, EngineError) and code not in ENGINE_FAILURES:
+                            code = "engine_failed"
                         self.store.transition(job.id, "failed", code)
+                        log_failure("background", job.model, job.cursor_ms, end, code, error, started)
                         self.release(job.id)
-        except Exception:
+        except Exception as error:
             with self.lock:
                 if not control.cancelled():
                     self.store.transition(job.id, "failed", "internal_error")
+                    log_failure("background", job.model, job.cursor_ms, end, "internal_error", error, started)
                     self.release(job.id)
         finally:
             with self.lock:

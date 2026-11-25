@@ -49,12 +49,18 @@ class Dispatcher:
                 return job, False
             if job_id == self.current:
                 return job, True
-            if job.attempts >= MAX_ATTEMPTS:
-                return job, False
             if job.state == "failed" and not retry:
+                return job, False
+            if job.state != "failed" and job.attempts >= MAX_ATTEMPTS:
                 return job, False
             if job_id not in self.pending and len(self.pending) + int(self.current is not None) >= self.capacity:
                 raise QueueError("queue_full")
+            if job.state == "failed":
+                job = self.runner.store.requeue_failed(job_id)
+                if job.state == "ready":
+                    return job, False
+                if job.state != "queued" or job.attempts >= MAX_ATTEMPTS:
+                    return job, False
             self.pending[job_id] = (token, self.clock() + self.credential_ttl, guard)
             if self.background is not None:
                 self.background.preempt()

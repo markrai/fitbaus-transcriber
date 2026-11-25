@@ -350,6 +350,35 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.submit(retry=True)[0], 202)
         self.assertEqual(self.wait_state(job_id, "ready")["attempts"], 2)
 
+    def test_explicit_retry_reopens_exhausted_window_without_automatic_retries(self):
+        self.fail_inference = True
+        job_id = self.submit()[1]["job_id"]
+        for attempt in range(1, 4):
+            failed = self.wait_state(job_id, "failed")
+            self.assertEqual(failed["attempts"], attempt)
+            self.assertEqual(failed["error"], "inference_failed")
+            self.assertEqual(self.submit()[0], 200)
+            self.assertEqual(self.calls, attempt)
+            if attempt < 3:
+                code, accepted = self.submit(retry=True)
+                self.assertEqual(code, 202)
+                self.assertEqual(accepted["state"], "queued")
+        self.fail_inference = False
+        self.release.clear()
+        self.entered.clear()
+        try:
+            code, accepted = self.submit(retry=True)
+            self.assertEqual(code, 202)
+            self.assertEqual(accepted["job_id"], job_id)
+            self.assertEqual(accepted["state"], "queued")
+            self.assertEqual(accepted["attempts"], 0)
+            self.assertTrue(self.entered.wait(3))
+            self.assertEqual(self.submit(retry=True)[0], 202)
+        finally:
+            self.release.set()
+        self.assertEqual(self.wait_state(job_id, "ready")["attempts"], 1)
+        self.assertEqual(self.calls, 4)
+
     def test_validation_and_stale_revision(self):
         for body in ("{}", '{"item_id":"a","item_id":"b"}', "x" * 4097):
             self.assertEqual(self.request("POST", "/v1/jobs", body)[0], 400)

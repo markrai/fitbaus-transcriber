@@ -1,10 +1,12 @@
 import json
 import threading
+import time
 
 from .audiobookshelf import SourceError
 from .background import PreparedSpec, profile
 from .model import MODELS
 from .engine import ENGINE_ID, EngineError
+from .diagnostics import ENGINE_FAILURES, log_failure
 from .inference_process import supervised_window
 from .jobs import JobSpec, QueueError
 from .qualification import load_record
@@ -73,6 +75,7 @@ class JobRunner:
                 self._authorize(prepared, token)
                 return prepared
         claimed = False
+        started = time.monotonic()
         try:
             with self.store.worker() as lock_fd:
                 try:
@@ -114,14 +117,15 @@ class JobRunner:
                             elif isinstance(error, SourceError):
                                 code = "source_failed"
                             elif isinstance(error, EngineError):
-                                code = str(error) if str(error) in (
-                                    "inference_timeout", "worker_crashed", "worker_unavailable",
-                                    "invalid_worker_result", "cancelled", "resource_unavailable") else "engine_failed"
+                                code = str(error) if str(error) in ENGINE_FAILURES else "engine_failed"
                             elif isinstance(error, QueueError) and str(error) == "result_limit":
                                 code = "result_limit"
                             else:
                                 code = "internal_error"
                             self.store.fail(job_id, code)
+                            if code != "cancelled":
+                                log_failure("live", getattr(self.engine, "model_name", "tiny"),
+                                            job.spec.start_ms, job.spec.end_ms, code, error, started)
                         elif control.cancelled():
                             try:
                                 self.store.cancel(job_id)
