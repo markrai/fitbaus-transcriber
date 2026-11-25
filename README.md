@@ -63,6 +63,10 @@ For updates, back up the data volume, download the selected release's Compose fi
 
 Pin an image digest (`ghcr.io/markrai/fitbaus-transcriber@sha256:...`) for content-addressed deployments. Version tags are intended never to be overwritten, but registry tags are not inherently immutable. No floating `latest` tag is published in this phase.
 
+## Optional audiobook summary provider
+
+The server can be configured with an OpenAI-compatible chat-completions endpoint for future audiobook summaries. It is disabled by default and independent of Whisper. See [summary provider configuration](docs/SUMMARY-PROVIDER.md) for local Ollama or other compatible endpoints, privacy, and current limitations. This foundation does not yet expose a summary generation API or submit audiobook text to a provider.
+
 ## Model policy
 
 | Model | Distribution | Intended use |
