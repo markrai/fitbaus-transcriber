@@ -21,6 +21,7 @@ from .qualification import inventory as qualification_inventory
 from .automatic_qualification import AutomaticQualification
 from .summary_provider import OpenAIChatProvider, SummaryProviderError, summary_capability
 from .summaries import SummaryError, SummaryRequest, generate_summary
+from .summary_cache import SummaryCache, SummaryCacheError
 
 
 class Service(ThreadingHTTPServer):
@@ -34,6 +35,7 @@ class Service(ThreadingHTTPServer):
         self.slots = threading.BoundedSemaphore(8)
         self.summary_slot = threading.BoundedSemaphore(1)
         self.summary_provider = OpenAIChatProvider(config.summary_provider) if config.summary_provider else None
+        self.summary_cache = SummaryCache(config.data_dir / "summaries")
         self.model_available = model_available or (lambda: model_present(model_directory(config.data_dir)))
         self.downloads = ModelDownloads(config.data_dir, config.model_quota_mib)
         self.dispatcher = None
@@ -333,12 +335,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(429, {"error": "summary_busy"})
         try:
             result = generate_summary(request, token, service.runner, service.dispatcher,
-                                      service.summary_provider, service.config.summary_provider.model,
-                                      service.readiness, self._device_guard())
+                                      service.summary_provider, service.config.summary_provider,
+                                      service.readiness, self._device_guard(), cache=service.summary_cache,
+                                      source_url=service.config.source.base_url)
         except (SourceError, QueueError) as error:
             return self._job_error(error)
         except SummaryError as error:
             return self._json(error.status, {"error": error.code})
+        except SummaryCacheError:
+            return self._json(503, {"error": "summary_cache_unavailable"})
         except SummaryProviderError as error:
             code = str(error)
             if code not in ("provider_authentication", "provider_rate_limited", "provider_http_error",
