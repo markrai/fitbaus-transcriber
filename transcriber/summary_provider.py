@@ -29,6 +29,7 @@ class SummaryProviderConfig:
     timeout: int = 60
     cache_epoch: str = "1"
     ca_file: str = ""
+    ca_pem: str = field(default="", repr=False)
 
     def __post_init__(self):
         url = urlsplit(self.base_url)
@@ -57,11 +58,22 @@ class SummaryProviderConfig:
             url.scheme != "https" or not Path(self.ca_file).is_absolute()
         )):
             raise ValueError("Summary CA requires HTTPS and an absolute certificate path")
-        if self.ca_file:
+        if not isinstance(self.ca_pem, str) or (self.ca_pem and (
+            url.scheme != "https" or self.ca_file or len(self.ca_pem) > 16384
+        )):
+            raise ValueError("Invalid pinned summary provider CA")
+        if self.ca_file or self.ca_pem:
             self.tls_context()
         object.__setattr__(self, "base_url", urlunsplit((url.scheme, url.netloc, url.path.rstrip("/"), "", "")))
 
     def tls_context(self):
+        if self.ca_pem:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            try:
+                context.load_verify_locations(cadata=self.ca_pem)
+            except (OSError, ValueError):
+                raise ValueError("Invalid pinned summary provider CA") from None
+            return context
         context = ssl.create_default_context()
         if self.ca_file:
             try:

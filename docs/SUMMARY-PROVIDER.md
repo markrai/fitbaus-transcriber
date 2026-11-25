@@ -63,3 +63,36 @@ The authenticated capabilities API advertises summary_provider_admin_probe_api. 
 - POST /v1/admin/summary-provider/test: explicit synthetic inference through the same adapter; returns success, model and elapsed milliseconds, not generated text.
 
 Probes share the summary concurrency slot and return sanitized errors. Neither probe accepts a caller-supplied URL, sends audiobook content, or changes configuration. A later administrator-authorized management flow and Trainer selector will build on these contracts. No remote configuration or hot switching is enabled in this phase.
+
+
+## Managed provider settings (Phase 2)
+
+The capability summary_provider_management_api advertises the provider selection backend. Configuration remains environment-based until an operator explicitly saves or disables a managed provider. The managed selection then takes precedence over environment settings, including after a restart. It is stored atomically at /data/summary-provider.json with mode 0600; protect backups and the data volume because this file contains provider credentials. A malformed or unreadable saved selection disables summaries rather than silently reverting to an alternate egress destination. Transcription and playback remain available; save a new provider to recover.
+
+Issue a one-use administration code on the host:
+
+```bash
+docker compose exec transcriber python -m transcriber summary-admin
+```
+
+The operator bearer must be used from loopback to issue the code. A normally paired bike redeems it; the resulting separate grant expires after ten minutes, is bound to that device, is invalid after successful save/disable/cancel, and is revoked by issuing another code or revoking the paired device. There are five attempts per code. Neither the operator bearer nor the saved provider API key is returned to the bike. Only use this flow on a trusted network or through authenticated HTTPS transport: the historical bike-to-Transcriber API can use plain HTTP, and administration codes, grants and newly entered credentials could otherwise be intercepted.
+
+API contract (all routes prefixed /v1/admin/summary-provider):
+
+| Method and suffix | Body | Result |
+| --- | --- | --- |
+| POST /issue | none | Loopback operator only: code, expires_in |
+| POST /redeem | code | Paired bearer: token, expires_in |
+| GET /session | none | Current redacted settings and storage_error |
+| POST /discover | kind, base_url, allow_http; optional api_key, timeout, lobo_auth | Candidate description and model identifiers |
+| POST /discover | use_current: true | Discover at the active endpoint using its stored credential and trust |
+| POST /test-candidate | model | Synthetic inference: ok, model, elapsed_ms |
+| POST /save | confirm_egress: true | Persist and activate the tested candidate; consume grant |
+| POST /disable | confirm: true | Persist disabled state; consume grant |
+| POST /cancel | empty object | Discard grant and candidate |
+
+Except issue/redeem, supply the existing paired bearer and X-FitBaus-Summary-Admin with the redeemed grant. The candidate is held in server memory only; every discovery or test invalidates the previous successful test. Saving requires a successful test in the same session and explicit consent to send requested narration to the selected endpoint. A failed test cannot change the active provider. An empty model listing permits manual model entry; otherwise choose an advertised model. New API keys require HTTPS. For custom private CAs configured in the environment, use_current retains the existing trust; arbitrary certificate paths are not accepted remotely.
+
+For LOBO, use kind lobo, an HTTPS private IPv4 address on port 7869 ending /v1, allow_http false, and the AUTH code shown on the phone. The server captures the two-certificate chain without sending HTTP, verifies the installation CA's SHA-256-derived AUTH code, then uses only that CA with normal IP/hostname verification for discovery and inference. The pinned CA is persisted with the selected provider. LOBO itself must remain on a trusted network; AUTH verifies device identity, not caller authorization.
+
+Probes use synthetic text only, share the summary slot, and never send an Audiobookshelf credential. Saving and disabling also share that slot so a generation request cannot see mismatched provider and cache settings. A new selection gets a new cache epoch. In-flight summary requests finish before a switch can succeed; clients should retry a busy response and reopen the audiobook to refresh capability/model state. No automatic summarization occurs. The Trainer selector is a separate implementation slice.
