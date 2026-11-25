@@ -244,6 +244,61 @@ class SummaryApiTests(unittest.TestCase):
         self.assertEqual(self.request(body), (503, {"error": "summary_cache_unavailable"}))
         self.assertEqual(len(self.calls), 2)
 
+    def test_section_plan_uses_prepared_windows_without_inference(self):
+        self.prepare([
+            (0, 300000, [Cue(280000, 290000, "Sentence ends.")]),
+            (300000, 600000, [Cue(300000, 305000, "Next phrase")]),
+        ])
+        body = {"source_id": "home", "item_id": "book", "audio_revision": IDENTITY.audio_revision,
+                "boundaries_ms": [0, 300000, 600000]}
+        self.server.summary_provider = None
+        code, result = self.request(body, path="/v1/section-plan")
+        self.assertEqual(code, 200)
+        self.assertEqual(result["state"], "refined")
+        self.assertEqual(result["boundaries_ms"], [0, 290000, 600000])
+        self.assertEqual(result["nominal_boundaries_ms"], body["boundaries_ms"])
+        self.assertEqual(len(result["transcript_digest"]), 64)
+        self.assertEqual(self.request(body, path="/v1/section-plan"), (200, result))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.transcriptions, [])
+        self.assertTrue(self.request(path="/v1/capabilities", method="GET")[1]["section_plan_api"])
+        self.assertEqual(self.request(body, operator=None, path="/v1/section-plan")[0], 401)
+        self.assertEqual(self.request(body, user=None, path="/v1/section-plan")[0], 401)
+        self.assertEqual(self.request(body, user="denied", path="/v1/section-plan")[0], 403)
+        self.assertEqual(self.request({**body, "audio_revision": "c" * 64}, path="/v1/section-plan")[0], 409)
+        self.assertEqual(self.request({**body, "source_id": "other"}, path="/v1/section-plan")[0], 404)
+
+    def test_section_plan_missing_transcript_does_not_schedule_work(self):
+        self.prepare([(0, 300000, [Cue(280000, 290000, "Sentence ends.")])])
+        body = {"source_id": "home", "item_id": "book", "audio_revision": IDENTITY.audio_revision,
+                "boundaries_ms": [0, 300000, 600000]}
+        code, result = self.request(body, path="/v1/section-plan")
+        self.assertEqual(code, 200)
+        self.assertEqual(result["state"], "nominal")
+        self.assertEqual(result["reason"], "missing_transcript")
+        self.assertEqual(result["boundaries_ms"], body["boundaries_ms"])
+        self.assertIsNone(result["transcript_digest"])
+        self.assertEqual(self.transcriptions, [])
+        self.assertEqual(self.calls, [])
+        for invalid in ([0, True, 600000], [0, 600001], [0, 300000, 300000], [0, 400000, 750001]):
+            self.assertEqual(self.request({**body, "boundaries_ms": invalid}, path="/v1/section-plan")[0], 400)
+
+    def test_section_plan_revocation_is_checked_after_reading(self):
+        self.prepare([
+            (0, 300000, [Cue(280000, 290000, "Sentence ends.")]),
+            (300000, 600000, []),
+        ])
+        _, device = self.server.pairing.redeem(self.server.pairing.issue())
+        original = self.server.runner.prepared.find_prepared
+        def revoke(*args):
+            result = original(*args)
+            self.server.pairing.revoke_all()
+            return result
+        self.server.runner.prepared.find_prepared = revoke
+        body = {"source_id": "home", "item_id": "book", "audio_revision": IDENTITY.audio_revision,
+                "boundaries_ms": [0, 300000, 600000]}
+        self.assertEqual(self.request(body, operator=device["token"], path="/v1/section-plan")[0], 401)
+
     def test_window_math_and_capability(self):
         request = SummaryRequest.parse(self.body(299999, 750000))
         self.assertEqual(request.windows(750000), [(0, 300000), (300000, 600000), (600000, 750000)])

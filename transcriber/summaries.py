@@ -60,7 +60,7 @@ class SummaryRequest:
                 "start_ms": self.start_ms, "end_ms": self.end_ms, **fields}
 
 
-def _authorize(request, token, runner, guard):
+def authorize_interval(request, token, runner, guard):
     if guard is not None and not guard():
         raise SourceError("unauthorized")
     manifest = runner.source.manifest(request.identity.item_id, token)
@@ -76,7 +76,7 @@ def _authorize(request, token, runner, guard):
     return manifest
 
 
-def _validate_window(job, identity, start, end):
+def validate_window(job, identity, start, end):
     try:
         if (job.spec.identity, job.spec.start_ms, job.spec.end_ms) != (identity, start, end):
             raise ValueError()
@@ -96,7 +96,7 @@ def _validate_window(job, identity, start, end):
 
 
 def generate_summary(request, token, runner, dispatcher, provider, config, readiness, guard=None, *, cache, source_url):
-    manifest = _authorize(request, token, runner, guard)
+    manifest = authorize_interval(request, token, runner, guard)
     pending = []
     snapshots = []
     for start, end in request.windows(manifest.duration_ms):
@@ -116,9 +116,9 @@ def generate_summary(request, token, runner, dispatcher, provider, config, readi
                     raise SummaryError("transcript_failed", 409)
                 pending.append(start)
                 continue
-        window = _validate_window(job, request.identity, start, end)
+        window = validate_window(job, request.identity, start, end)
         snapshots.append((job.spec.profile, window))
-    _authorize(request, token, runner, guard)
+    authorize_interval(request, token, runner, guard)
     if pending:
         return request.response(state="pending_transcript", pending_windows=pending)
     digest = hashlib.sha256()
@@ -138,16 +138,16 @@ def generate_summary(request, token, runner, dispatcher, provider, config, readi
         return request.response(state="empty", summary=None, **fields)
     key = cache_key(request, source_url, config, fields["transcript_digest"],
                     PROMPT_VERSION, SYSTEM_PROMPT, MAX_OUTPUT_TOKENS)
-    _authorize(request, token, runner, guard)
+    authorize_interval(request, token, runner, guard)
     cached = cache.get(key)
     if cached is not None:
-        _authorize(request, token, runner, guard)
+        authorize_interval(request, token, runner, guard)
         return request.response(state="ready", summary=cached, cache_hit=True, **fields)
-    _authorize(request, token, runner, guard)
+    authorize_interval(request, token, runner, guard)
     summary = provider.complete(SYSTEM_PROMPT, "\n".join(cues))
     if not valid_summary(summary):
         raise SummaryProviderError("invalid_completion")
-    _authorize(request, token, runner, guard)
+    authorize_interval(request, token, runner, guard)
     cache.put(key, summary)
-    _authorize(request, token, runner, guard)
+    authorize_interval(request, token, runner, guard)
     return request.response(state="ready", summary=summary, cache_hit=False, **fields)
