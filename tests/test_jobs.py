@@ -76,6 +76,24 @@ class JobTests(unittest.TestCase):
         with self.assertRaisesRegex(QueueError, "job_not_runnable"):
             self.runner.run(job.spec.id, "authorized")
 
+    def test_failure_diagnostics_are_sanitized_and_persisted(self):
+        from transcriber.engine import EngineError
+        job = self.submit()
+        def fail(*args):
+            raise EngineError("audio_decode_failed", exception_type="CalledProcessError", exit_status=1)
+        self.runner.transcribe = fail
+        with self.assertLogs("transcriber.diagnostics", level="WARNING") as logs:
+            with self.assertRaisesRegex(EngineError, "audio_decode_failed"):
+                self.runner.run(job.spec.id, "authorized")
+        self.assertEqual(self.store.get(job.spec.id).error, "audio_decode_failed")
+        line = logs.output[0]
+        for field in ("kind=live", "model=tiny", "start_ms=0", "end_ms=1000",
+                      "stage=decode", "code=audio_decode_failed", "exception_type=CalledProcessError",
+                      "exit_status=1", "elapsed_ms="):
+            self.assertIn(field, line)
+        self.assertNotIn("authorized", line)
+        self.assertNotIn("Narration", line)
+
     def test_authorization_and_revision_on_cached_read(self):
         job = self.submit()
         self.runner.run(job.spec.id, "authorized")

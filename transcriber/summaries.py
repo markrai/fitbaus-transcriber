@@ -4,7 +4,6 @@ import json
 
 from .audiobookshelf import SourceError
 from .contract import AudioIdentity, Cue, MAX_TIME_MS, MAX_WINDOW_MS, SCHEMA, TranscriptWindow
-from .jobs import MAX_ATTEMPTS
 from .summary_provider import MAX_INPUT_BYTES, MAX_OUTPUT_TOKENS, SummaryProviderError
 from .summary_cache import cache_key, valid_summary
 
@@ -165,7 +164,7 @@ def generate_summary(request, token, runner, dispatcher, provider, config, readi
         job = runner.submit(request.identity.item_id, token, start, end,
                             request.identity.audio_revision, request.identity.source_id)
         if job.state != "ready":
-            if job.state == "failed" and (not request.retry or job.attempts >= MAX_ATTEMPTS):
+            if job.state == "failed" and not request.retry:
                 raise SummaryError("transcript_failed", 409)
             reason = readiness()
             if reason:

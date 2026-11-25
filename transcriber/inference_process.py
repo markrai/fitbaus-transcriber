@@ -12,6 +12,7 @@ import time
 from .audiobookshelf import Audiobookshelf, SourceConfig, SourceError, valid_bearer
 from .contract import AudioIdentity, Cue, SCHEMA, TranscriptWindow
 from .engine import EngineConfig, EngineError, WhisperCpuEngine, transcribe_window
+from .diagnostics import ENGINE_FAILURES, EXCEPTION_TYPES, exception_type, safe_exit_status
 from .jobs import MAX_RESULT_BYTES, QueueError
 
 POLL_SECONDS = 0.1
@@ -80,7 +81,7 @@ def supervise(payload, timeout, cancelled, lock_fd, command=None, spawn=subproce
         if time.monotonic() >= deadline:
             raise EngineError("inference_timeout")
         if process.returncode != 0:
-            raise EngineError("worker_crashed")
+            raise EngineError("worker_crashed", exit_status=process.returncode)
         if len(output) > MAX_RESULT_BYTES + 1024:
             raise QueueError("result_limit")
         try:
@@ -92,6 +93,15 @@ def supervise(payload, timeout, cancelled, lock_fd, command=None, spawn=subproce
                 raise SourceError(code if code in SOURCE_ERRORS else "source_failed")
             if result == {"error": "result_limit"}:
                 raise QueueError("result_limit")
+            if set(result) == {"error", "exception_type", "exit_status"}:
+                code = result["error"]
+                detail = result["exception_type"]
+                status = result["exit_status"]
+                if (not isinstance(code, str) or code not in ENGINE_FAILURES
+                        or (detail is not None and (not isinstance(detail, str) or detail not in EXCEPTION_TYPES))
+                        or (status is not None and safe_exit_status(status) is None)):
+                    raise ValueError
+                raise EngineError(code, exception_type=detail, exit_status=status)
             if result == {"error": "engine_failed"}:
                 raise EngineError("inference_failed")
             if set(result) != {"window"}:
@@ -110,8 +120,8 @@ def supervise(payload, timeout, cancelled, lock_fd, command=None, spawn=subproce
             return window
         except (KeyError, TypeError, ValueError, RecursionError):
             raise EngineError("invalid_worker_result") from None
-    except OSError:
-        raise EngineError("worker_unavailable") from None
+    except OSError as error:
+        raise EngineError("worker_unavailable", exception_type=exception_type(error)) from None
     finally:
         if process is not None:
             if not finished:
@@ -195,8 +205,16 @@ def worker(parent):
         response = '{"window":' + result + '}' if len(result.encode("ascii")) <= MAX_RESULT_BYTES else '{"error":"result_limit"}'
     except SourceError as error:
         response = json.dumps({"source_error": error.code if error.code in SOURCE_ERRORS else "source_failed"})
-    except (EngineError, ValueError):
-        response = '{"error":"engine_failed"}'
+    except EngineError as error:
+        code = str(error)
+        response = json.dumps({
+            "error": code if code in ENGINE_FAILURES else "engine_failed",
+            "exception_type": error.exception_type if error.exception_type in EXCEPTION_TYPES else None,
+            "exit_status": safe_exit_status(error.exit_status),
+        })
+    except ValueError as error:
+        response = json.dumps({"error": "invalid_transcript",
+                               "exception_type": exception_type(error), "exit_status": None})
     output.write(response)
     output.flush()
 

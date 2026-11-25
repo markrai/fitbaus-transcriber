@@ -5,6 +5,7 @@ import threading
 
 from .audiobookshelf import SourceError
 from .contract import Cue, MAX_CUE_CHARS, MAX_CUES, MAX_WINDOW_MS, TranscriptWindow
+from .diagnostics import exception_type, safe_exit_status
 from .model import model_spec, model_directory, model_present
 
 SAMPLE_RATE = 16_000
@@ -15,7 +16,10 @@ FORMATS = "aac,mp3,mov,mp4,m4a,3gp,3g2,mj2,flac,wav,ogg,matroska,webm,asf,aiff"
 
 
 class EngineError(Exception):
-    pass
+    def __init__(self, code, *, exception_type=None, exit_status=None):
+        super().__init__(code)
+        self.exception_type = exception_type
+        self.exit_status = safe_exit_status(exit_status)
 
 
 @dataclass(frozen=True)
@@ -58,8 +62,11 @@ def decode_pcm(file, start_ms, end_ms, timeout=120):
         result = subprocess.run(command, pass_fds=(fd,), stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                 timeout=timeout, check=True)
-    except (OSError, subprocess.SubprocessError):
-        raise EngineError("audio_decode_failed") from None
+    except subprocess.TimeoutExpired as error:
+        raise EngineError("audio_decode_timeout", exception_type=exception_type(error)) from None
+    except (OSError, subprocess.SubprocessError) as error:
+        raise EngineError("audio_decode_failed", exception_type=exception_type(error),
+                          exit_status=getattr(error, "returncode", None)) from None
     pcm = result.stdout
     expected = duration * BYTES_PER_MS
     if not pcm or len(pcm) % 2 or len(pcm) > expected + 4096:
@@ -113,8 +120,8 @@ class WhisperCpuEngine:
                     str(self.path), device="cpu", compute_type="int8",
                     cpu_threads=self.config.cpu_threads, num_workers=1, local_files_only=True,
                 )
-            except Exception:
-                raise EngineError("model_load_failed") from None
+            except Exception as error:
+                raise EngineError("model_load_failed", exception_type=exception_type(error)) from None
         return self._model
 
     def transcribe(self, pcm, start_ms, end_ms):
@@ -135,8 +142,8 @@ class WhisperCpuEngine:
                 return normalize_segments(segments, start_ms, end_ms)
             except EngineError:
                 raise
-            except Exception:
-                raise EngineError("inference_failed") from None
+            except Exception as error:
+                raise EngineError("inference_failed", exception_type=exception_type(error)) from None
 
 
 def transcribe_window(source, identity, token, directory, engine, start_ms, end_ms, decoder=decode_pcm):
