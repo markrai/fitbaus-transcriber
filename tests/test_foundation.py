@@ -103,6 +103,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertFalse(body["transcription"])
         self.assertEqual(body["transcript_schema"], "fitbaus.transcript/v1")
+        self.assertEqual(body["summary_provider"], {"configured": False})
 
     def test_no_query_token_or_unimplemented_transcript_routes(self):
         self.assertEqual(self.get("/v1/capabilities?token=" + TOKEN)[0], 401)

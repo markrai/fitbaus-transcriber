@@ -5,6 +5,7 @@ from pathlib import Path
 from .audiobookshelf import SourceConfig
 from .engine import EngineConfig
 from .jobs import QueueLimits
+from .summary_provider import SummaryProviderConfig
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,7 @@ class Config:
     engine: EngineConfig = EngineConfig()
     queue: QueueLimits = QueueLimits()
     model_quota_mib: int = 1024
+    summary_provider: SummaryProviderConfig | None = None
 
     @classmethod
     def from_env(cls, env=None):
@@ -58,4 +60,5 @@ class Config:
         model_quota = int(env.get("TRANSCRIBER_MODEL_QUOTA_MIB", "1024"))
         if not 128 <= model_quota <= 4096:
             raise ValueError("Optional model quota must be between 128 and 4096 MiB")
-        return cls(token, env.get("TRANSCRIBER_BIND", "127.0.0.1"), port, data_dir, source, engine, queue, model_quota)
+        return cls(token, env.get("TRANSCRIBER_BIND", "127.0.0.1"), port, data_dir, source, engine, queue, model_quota,
+                   SummaryProviderConfig.from_env(env))

@@ -19,6 +19,7 @@ from .model import DEFAULT_MODEL, model_directory, model_present
 from .model_downloads import ModelDownloads, DownloadError
 from .qualification import inventory as qualification_inventory
 from .automatic_qualification import AutomaticQualification
+from .summary_provider import summary_capability
 
 
 class Service(ThreadingHTTPServer):
@@ -206,6 +207,7 @@ class Handler(BaseHTTPRequestHandler):
                 "running_job_cancel": True,
                 "inference_timeout_seconds": self.server.config.engine.inference_timeout,
                 "pairing_api": True,
+                "summary_provider": summary_capability(self.server.config.summary_provider),
                 "max_window_ms": MAX_WINDOW_MS,
                 "source_configured": self.server.source is not None,
                 "source_id": self.server.config.source.source_id if self.server.config.source else None,
