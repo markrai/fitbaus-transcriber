@@ -16,7 +16,7 @@ from transcriber.engine import EngineConfig
 from transcriber.jobs import JobStore
 from transcriber.runner import JobRunner
 from transcriber.server import Service
-from transcriber.summaries import SummaryRequest
+from transcriber.summaries import RecapRequest, SummaryRequest
 from transcriber.summary_cache import SummaryCache
 from transcriber.summary_provider import SummaryProviderConfig, SummaryProviderError
 
@@ -298,6 +298,128 @@ class SummaryApiTests(unittest.TestCase):
         body = {"source_id": "home", "item_id": "book", "audio_revision": IDENTITY.audio_revision,
                 "boundaries_ms": [0, 300000, 600000]}
         self.assertEqual(self.request(body, operator=device["token"], path="/v1/section-plan")[0], 401)
+
+    def recap_body(self, position=10000, **extra):
+        return dict(source_id="home", item_id="book", audio_revision=IDENTITY.audio_revision,
+                    position_ms=position, **extra)
+
+    def recap(self, position=10000, **kwargs):
+        return self.request(self.recap_body(position), path="/v1/recaps", **kwargs)
+
+    def test_recap_excludes_unheard_and_straddling_cues(self):
+        self.prepare([
+            (0, 300000, [Cue(90000, 110000, "too old straddling"), Cue(120000, 130000, "heard one")]),
+            (300000, 600000, [Cue(300000, 310000, "heard two")]),
+            (600000, 750000, [Cue(610000, 620000, "heard three"),
+                               Cue(680000, 690000, "heard at cutoff"),
+                               Cue(690000, 710000, "unheard continuation"),
+                               Cue(720000, 730000, "future")]),
+        ])
+        code, result = self.recap(700000)
+        self.assertEqual(code, 200)
+        self.assertEqual(result["schema"], "fitbaus.recap/v1")
+        self.assertEqual(result["position_ms"], 700000)
+        self.assertEqual((result["start_ms"], result["end_ms"]), (100000, 700000))
+        self.assertEqual(result["prompt_version"], "recap-v1")
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(self.calls[0][1], "heard one\nheard two\nheard three\nheard at cutoff")
+        self.assertIn("Do not add information", self.calls[0][0])
+        self.assertEqual(self.transcriptions, [])
+
+    def test_recap_cache_is_separate_and_bound_to_exact_position(self):
+        self.prepare([(0, 300000, [Cue(1000, 2000, "first"), Cue(10000, 11000, "next")])])
+        self.assertFalse(self.request(self.body(0, 10000))[1]["cache_hit"])
+        first = self.recap()[1]
+        self.assertFalse(first["cache_hit"])
+        self.assertTrue(self.recap()[1]["cache_hit"])
+        self.assertFalse(self.recap(11000)[1]["cache_hit"])
+        self.assertEqual(self.calls[-1][1], "first\nnext")
+        self.assertEqual(len(self.calls), 3)
+        self.assertEqual(self.recap(user="denied")[0], 403)
+        self.source.identity = AudioIdentity("home", "book", "c" * 64)
+        self.assertEqual(self.recap()[0], 409)
+        self.assertEqual(len(self.calls), 3)
+
+    def test_recap_zero_and_no_contained_narration_do_not_invoke_provider(self):
+        code, zero = self.recap(0)
+        self.assertEqual(code, 200)
+        self.assertEqual((zero["start_ms"], zero["end_ms"], zero["position_ms"]), (0, 0, 0))
+        self.assertEqual(zero["state"], "empty")
+        self.assertIsNone(zero["summary"])
+        self.assertEqual(self.transcriptions, [])
+        self.assertEqual(self.recap(0, operator=None)[0], 401)
+        self.assertEqual(self.recap(0, user="denied")[0], 403)
+        self.prepare([(0, 300000, [Cue(1000, 2000, "not yet fully heard")])])
+        self.assertEqual(self.recap(1500)[1]["state"], "empty")
+        self.assertEqual(self.calls, [])
+
+    def test_recap_pending_resolves_only_intersecting_windows(self):
+        code, result = self.recap(310000)
+        self.assertEqual(code, 202)
+        self.assertEqual(result["state"], "pending_transcript")
+        self.assertEqual(result["position_ms"], 310000)
+        self.assertTrue(set(result["pending_windows"]) <= {0, 300000})
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            code, result = self.recap(310000)
+            if code == 200:
+                break
+            self.assertEqual(code, 202)
+            time.sleep(0.02)
+        self.assertEqual(code, 200)
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(self.transcriptions, [0, 300000])
+        self.assertEqual(self.calls[0][1], "Window 0\nWindow 300000")
+
+    def test_recap_rejects_invalid_positions_and_caller_supplied_ranges(self):
+        for position in (-1, True, "10000", 750001, 10000.5):
+            self.assertEqual(self.recap(position)[0], 400)
+        for extra in ({"start_ms": 0}, {"end_ms": 20000}, {"prompt": "override"}, {"retry": 1}):
+            self.assertEqual(self.request(self.recap_body(**extra), path="/v1/recaps")[0], 400)
+        self.assertEqual(self.request(self.recap_body(), path="/v1/summaries")[0], 400)
+        self.assertEqual(self.request(self.body(), path="/v1/recaps")[0], 400)
+        self.assertEqual(self.recap(operator=None)[0], 401)
+        self.assertEqual(self.recap(user=None)[0], 401)
+
+    def test_recap_revocation_and_shared_summary_slot(self):
+        self.prepare([(0, 300000, [Cue(1000, 2000, "first")])])
+        _, device = self.server.pairing.redeem(self.server.pairing.issue())
+        self.release.clear()
+        results = []
+        worker = threading.Thread(target=lambda: results.append(self.recap(operator=device["token"])))
+        worker.start()
+        try:
+            self.assertTrue(self.entered.wait(3))
+            self.assertEqual(self.request(self.body(0, 10000)), (429, {"error": "summary_busy"}))
+            self.server.pairing.revoke_all()
+        finally:
+            self.release.set()
+            worker.join(timeout=7)
+        self.assertEqual(results, [(401, {"error": "unauthorized"})])
+        self.assertEqual(len(self.calls), 1)
+        self.assertFalse(self.recap()[1]["cache_hit"])
+
+    def test_recap_window_math_and_capability(self):
+        request = RecapRequest.parse(self.recap_body(700000))
+        self.assertEqual(request.windows(750000), [(0, 300000), (300000, 600000), (600000, 750000)])
+        self.assertEqual(RecapRequest.parse(self.recap_body(300000)).windows(750000), [(0, 300000)])
+        self.assertEqual(RecapRequest.parse(self.recap_body(0)).windows(750000), [])
+        self.assertTrue(self.request(path="/v1/capabilities", method="GET")[1]["recap_api"])
+
+    def test_recap_digest_tracks_profile_but_never_sends_future_cues(self):
+        runner = self.server.runner
+        job = runner.submit("book", USER, 0, 300000)
+        runner.store.claim(job.spec.id)
+        runner.store.complete(job.spec.id, TranscriptWindow(IDENTITY, 0, 300000,
+                              (Cue(1000, 2000, "heard"), Cue(20000, 21000, "future one"))))
+        first = self.recap()[1]
+        self.assertFalse(first["cache_hit"])
+        self.prepare([(0, 300000, [Cue(1000, 2000, "heard"), Cue(20000, 21000, "future two")])])
+        second = self.recap()[1]
+        self.assertFalse(second["cache_hit"])
+        self.assertNotEqual(first["transcript_digest"], second["transcript_digest"])
+        self.assertEqual(self.calls[0][1], self.calls[1][1])
+        self.assertEqual(self.calls[1][1], "heard")
 
     def test_window_math_and_capability(self):
         request = SummaryRequest.parse(self.body(299999, 750000))
