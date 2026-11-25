@@ -5,6 +5,7 @@ import threading
 import re
 import sqlite3
 import time
+from dataclasses import replace
 
 from .pairing import Pairing, TTL_SECONDS
 
@@ -21,6 +22,7 @@ from .model_downloads import ModelDownloads, DownloadError
 from .qualification import inventory as qualification_inventory
 from .automatic_qualification import AutomaticQualification
 from .summary_provider import OpenAIChatProvider, SummaryProviderError, summary_capability
+from .summary_management import ADMIN_HEADER, ROOT, ManagementError, SummaryManagement, describe
 from .summaries import RecapRequest, SummaryError, SummaryRequest, generate_summary
 from .summary_cache import SummaryCache, SummaryCacheError
 from .section_plan import SectionPlanRequest, section_plan
@@ -38,7 +40,16 @@ class Service(ThreadingHTTPServer):
         self.slots = threading.BoundedSemaphore(8)
         self.summary_slot = threading.BoundedSemaphore(1)
         self.section_plan_slot = threading.BoundedSemaphore(1)
-        self.summary_provider = OpenAIChatProvider(config.summary_provider) if config.summary_provider else None
+        self.summary_management = SummaryManagement(config.data_dir)
+        self.summary_settings_error = False
+        try:
+            active = self.summary_management.settings.load(config.summary_provider)
+            self.summary_provider = OpenAIChatProvider(active) if active else None
+        except (OSError, ValueError, TypeError, RecursionError):
+            active = None
+            self.summary_provider = None
+            self.summary_settings_error = True
+        self.config = replace(config, summary_provider=active)
         self.summary_cache = SummaryCache(config.data_dir / "summaries")
         self.model_available = model_available or (lambda: model_present(model_directory(config.data_dir)))
         self.downloads = ModelDownloads(config.data_dir, config.model_quota_mib)
@@ -64,6 +75,11 @@ class Service(ThreadingHTTPServer):
             self.qualification = AutomaticQualification(self.runner)
             self.dispatcher = Dispatcher(self.runner, config.queue.max_active, background=self.background,
                                          qualification=self.qualification)
+
+    def activate_summary_provider(self, config, provider):
+        self.config = replace(self.config, summary_provider=config)
+        self.summary_provider = provider
+        self.summary_settings_error = False
 
     def readiness(self):
         if self.source is None:
@@ -219,6 +235,7 @@ class Handler(BaseHTTPRequestHandler):
                 "summary_provider": summary_capability(self.server.config.summary_provider),
                 "summary_api": True,
                 "summary_provider_admin_probe_api": True,
+                "summary_provider_management_api": True,
                 "recap_api": True,
                 "cumulative_recap_api": True,
                 "cumulative_recap_max_position_ms": MAX_POSITION_MS,
@@ -230,13 +247,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/v1/admin/summary-provider":
             if not self._summary_admin_authorized():
                 return self._json(401, {"error": "unauthorized"})
-            config = self.server.config.summary_provider
-            return self._json(200, {"configured": config is not None,
-                "base_url": config.base_url if config else None,
-                "model": config.model if config else None,
-                "has_api_key": bool(config and config.api_key),
-                "custom_ca": bool(config and config.ca_file),
-                "allow_http": bool(config and config.allow_http)})
+            return self._json(200, {**describe(self.server.config.summary_provider),
+                "storage_error": self.server.summary_settings_error})
+        if self.path == ROOT + "/session":
+            return self._summary_management("status")
         if self.path == "/v1/qualification":
             result = (self.server.qualification.inventory() if self.server.qualification is not None else
                       qualification_inventory(self.server.config.data_dir, self.server.config.engine))
@@ -292,6 +306,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._pairing_request()
         if not self._authorized():
             return self._json(401, {"error": "unauthorized"})
+        if self.path == ROOT + "/issue":
+            if not self._summary_admin_authorized():
+                return self._json(401, {"error": "unauthorized"})
+            manager = self.server.summary_management
+            if not manager.lock.acquire(blocking=False):
+                return self._json(429, {"error": "summary_busy"})
+            try:
+                return self._json(200, manager.issue())
+            finally:
+                manager.lock.release()
+        if self.path in (ROOT + "/redeem", ROOT + "/discover", ROOT + "/test-candidate",
+                         ROOT + "/save", ROOT + "/disable", ROOT + "/cancel"):
+            return self._summary_management(self.path.rsplit("/", 1)[1])
         if self.path in ("/v1/admin/summary-provider/models", "/v1/admin/summary-provider/test"):
             return self._summary_admin_probe(self.path.endswith("/models"))
         if self.path == "/v1/section-plan":
@@ -370,6 +397,55 @@ class Handler(BaseHTTPRequestHandler):
             service.section_plan_slot.release()
         return self._json(200, result)
 
+    def _summary_management(self, action):
+        if self._operator_authorized():
+            return self._json(401, {"error": "paired_device_required"})
+        guard = self._device_guard()
+        if guard is None or not guard():
+            return self._json(401, {"error": "unauthorized"})
+        device = self.headers["Authorization"][7:]
+        values = self.headers.get_all(ADMIN_HEADER) or []
+        if action != "redeem" and (len(values) != 1 or not re.fullmatch(r"[A-Za-z0-9_-]{43}", values[0])):
+            return self._json(401, {"error": "summary_admin_unavailable"})
+        service = self.server
+        manager = service.summary_management
+        if not service.summary_slot.acquire(blocking=False):
+            return self._json(429, {"error": "summary_busy"})
+        try:
+            if action == "status":
+                body = {}
+            else:
+                body = self._body()
+                if not isinstance(body, dict):
+                    raise ValueError()
+            if action == "redeem":
+                if set(body) != {"code"}:
+                    raise ValueError()
+                result = manager.redeem(body["code"], device)
+            else:
+                result = manager.execute("test" if action == "test-candidate" else action,
+                    body, values[0], device, guard, service.config.summary_provider, service.activate_summary_provider)
+                if action == "status":
+                    result["storage_error"] = service.summary_settings_error
+            return self._json(200, result)
+        except ManagementError as error:
+            return self._json(error.status, {"error": str(error)})
+        except SummaryProviderError as error:
+            code = str(error)
+            if code not in ("provider_authentication", "provider_rate_limited", "provider_http_error",
+                            "provider_unavailable", "provider_timeout", "response_too_large",
+                            "invalid_response", "invalid_completion"):
+                code = "provider_unavailable"
+            return self._json(504 if code == "provider_timeout" else 502, {"error": code})
+        except TimeoutError:
+            return self._json(408, {"error": "request_timeout"})
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            return self._json(400, {"error": "invalid_request"})
+        except OSError:
+            return self._json(503, {"error": "summary_settings_unavailable"})
+        finally:
+            service.summary_slot.release()
+
     def _summary_admin_authorized(self):
         return self.client_address[0] in ("127.0.0.1", "::1") and self._operator_authorized()
 
@@ -377,11 +453,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self._summary_admin_authorized():
             return self._json(401, {"error": "unauthorized"})
         service = self.server
-        if service.summary_provider is None:
-            return self._json(503, {"error": "summary_provider_not_configured"})
         if not service.summary_slot.acquire(blocking=False):
             return self._json(429, {"error": "summary_busy"})
         try:
+            if service.summary_provider is None:
+                return self._json(503, {"error": "summary_provider_not_configured"})
             start = time.monotonic()
             if models:
                 result = {"models": service.summary_provider.models()}
@@ -420,6 +496,8 @@ class Handler(BaseHTTPRequestHandler):
         if not service.summary_slot.acquire(blocking=False):
             return self._json(429, {"error": "summary_busy"})
         try:
+            if service.summary_provider is None:
+                return self._json(503, {"error": "summary_provider_not_configured"})
             if cumulative:
                 result = cumulative_recap(request, token, service.runner,
                                           service.summary_provider, service.config.summary_provider,

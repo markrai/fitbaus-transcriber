@@ -77,6 +77,7 @@ def main(argv=None):
         command = commands.add_parser(name)
         command.add_argument("model", choices=("base", "small"))
     commands.add_parser("pair")
+    commands.add_parser("summary-admin")
     commands.add_parser("revoke-pairings")
     discard = commands.add_parser("discard-job")
     discard.add_argument("--job-id", required=True)
@@ -137,8 +138,9 @@ def main(argv=None):
             if count == 0:
                 print("No accessible book libraries. Check Audiobookshelf permissions.", file=sys.stderr)
                 return 1
-        elif args.command in ("pair", "revoke-pairings"):
-            path = "/v1/pairing/issue" if args.command == "pair" else "/v1/pairing/revoke-all"
+        elif args.command in ("pair", "revoke-pairings", "summary-admin"):
+            path = {"pair": "/v1/pairing/issue", "revoke-pairings": "/v1/pairing/revoke-all",
+                    "summary-admin": "/v1/admin/summary-provider/issue"}[args.command]
             client = http.client.HTTPConnection("127.0.0.1", config.port, timeout=5)
             try:
                 client.request("POST", path, headers={"Authorization": "Bearer " + config.token})
@@ -146,7 +148,11 @@ def main(argv=None):
                 if response.status != 200:
                     raise ValueError("Pairing management failed")
                 result = json.loads(response.read(4096))
-                if args.command == "pair":
+                if args.command == "summary-admin":
+                    print(result["code"])
+                    print("Provider administration code: use only over a trusted private network. "
+                          "The bike API may use unencrypted HTTP. Valid for 10 minutes; single use.", file=sys.stderr)
+                elif args.command == "pair":
                     print(result["code"])
                     print("Valid for 10 minutes; single use. Keep private.", file=sys.stderr)
                 else:
