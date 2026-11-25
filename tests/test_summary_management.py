@@ -100,9 +100,9 @@ class ManagementApiTests(unittest.TestCase):
                 other = server.pairing.redeem(server.pairing.issue())[1]["token"]
                 worker = threading.Thread(target=server.serve_forever, daemon=True)
                 worker.start()
-                def call(method, suffix, device=paired, grant=None, body=None):
+                def call(method, suffix, device=None, grant=None, body=None):
                     conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
-                    headers = {"Authorization": "Bearer " + device}
+                    headers = {"Authorization": "Bearer " + (paired if device is None else device)}
                     if grant:
                         headers[ADMIN_HEADER] = grant
                     if body is not None:
@@ -154,8 +154,12 @@ class ManagementApiTests(unittest.TestCase):
                     grant = authorize()
                     server.pairing.revoke_all()
                     self.assertEqual(call("POST", "/disable", grant=grant, body={"confirm": True})[0], 401)
+                    revoked = paired
                     paired = server.pairing.redeem(server.pairing.issue())[1]["token"]
+                    self.assertNotEqual(paired, revoked)
+                    self.assertEqual(call("GET", "/session", device=revoked, grant=grant)[0], 401)
                     grant = authorize()
+                    self.assertEqual(call("GET", "/session", device=revoked, grant=grant)[0], 401)
                     self.assertEqual(call("POST", "/disable", grant=grant, body={"confirm": True})[0], 200)
                     self.assertIsNone(server.summary_provider)
                     self.assertIsNone(SummarySettings(directory).load(config.summary_provider))
