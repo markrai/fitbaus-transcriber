@@ -1,3 +1,4 @@
+from dataclasses import replace
 import http.client
 import json
 from pathlib import Path
@@ -16,6 +17,7 @@ from transcriber.jobs import JobStore
 from transcriber.runner import JobRunner
 from transcriber.server import Service
 from transcriber.summaries import SummaryRequest
+from transcriber.summary_cache import SummaryCache
 from transcriber.summary_provider import SummaryProviderConfig, SummaryProviderError
 
 
@@ -185,6 +187,62 @@ class SummaryApiTests(unittest.TestCase):
         self.assertEqual(self.request(body), (403, {"error": "forbidden"}))
         self.server.summary_provider = None
         self.assertEqual(self.request(body)[0], 503)
+
+    def test_cache_reuse_and_fresh_authorization(self):
+        self.prepare([(0, 300000, [Cue(1000, 2000, "first")])])
+        body = self.body(0, 10000)
+        code, first = self.request(body)
+        self.assertEqual(code, 200)
+        self.assertFalse(first["cache_hit"])
+        self.server.summary_cache = SummaryCache(self.server.config.data_dir / "summaries")
+        self.failure = "provider_unavailable"
+        code, second = self.request(body)
+        self.assertEqual(code, 200)
+        self.assertTrue(second["cache_hit"])
+        self.assertEqual(first["summary"], second["summary"])
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.request(body, user="denied")[0], 403)
+        _, device = self.server.pairing.redeem(self.server.pairing.issue())
+        self.server.pairing.revoke_all()
+        self.assertEqual(self.request(body, operator=device["token"])[0], 401)
+        self.source.identity = AudioIdentity("home", "book", "c" * 64)
+        self.assertEqual(self.request(body)[0], 409)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_provider_epoch_and_transcript_profile_invalidate(self):
+        runner = self.server.runner
+        job = runner.submit("book", USER, 0, 300000)
+        runner.store.claim(job.spec.id)
+        runner.store.complete(job.spec.id, TranscriptWindow(IDENTITY, 0, 300000, (Cue(1000, 2000, "live"),)))
+        body = self.body(0, 10000)
+        first = self.request(body)[1]
+        self.assertFalse(first["cache_hit"])
+        self.prepare([(0, 300000, [Cue(1000, 2000, "prepared")])])
+        second = self.request(body)[1]
+        self.assertFalse(second["cache_hit"])
+        self.assertNotEqual(first["transcript_digest"], second["transcript_digest"])
+        self.assertEqual(self.calls[-1][1], "prepared")
+        config = self.server.config
+        self.server.config = replace(config, summary_provider=replace(config.summary_provider, cache_epoch="2"))
+        third = self.request(body)[1]
+        self.assertFalse(third["cache_hit"])
+        self.assertEqual(second["transcript_digest"], third["transcript_digest"])
+        self.assertEqual(len(self.calls), 3)
+
+    def test_failed_provider_and_cache_storage_error(self):
+        self.prepare([(0, 300000, [Cue(1000, 2000, "first")])])
+        body = self.body(0, 10000)
+        self.failure = "provider_unavailable"
+        self.assertEqual(self.request(body)[0], 502)
+        self.failure = None
+        self.assertFalse(self.request(body)[1]["cache_hit"])
+        self.assertTrue(self.request(body)[1]["cache_hit"])
+        self.assertEqual(len(self.calls), 2)
+        blocked = self.server.config.data_dir / "blocked"
+        blocked.write_text("not a directory")
+        self.server.summary_cache = SummaryCache(blocked)
+        self.assertEqual(self.request(body), (503, {"error": "summary_cache_unavailable"}))
+        self.assertEqual(len(self.calls), 2)
 
     def test_window_math_and_capability(self):
         request = SummaryRequest.parse(self.body(299999, 750000))

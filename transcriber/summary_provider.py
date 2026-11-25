@@ -25,6 +25,7 @@ class SummaryProviderConfig:
     api_key: str = field(default="", repr=False)
     allow_http: bool = False
     timeout: int = 60
+    cache_epoch: str = "1"
 
     def __post_init__(self):
         url = urlsplit(self.base_url)
@@ -45,6 +46,8 @@ class SummaryProviderConfig:
             raise ValueError("Invalid summary provider model")
         if len(self.api_key) > 8192 or any(not 33 <= ord(c) <= 126 for c in self.api_key):
             raise ValueError("Invalid summary provider API key")
+        if not isinstance(self.cache_epoch, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", self.cache_epoch):
+            raise ValueError("Invalid summary cache epoch")
         if type(self.timeout) is not int or not 5 <= self.timeout <= 120:
             raise ValueError("Summary provider timeout must be between 5 and 120 seconds")
         object.__setattr__(self, "base_url", urlunsplit((url.scheme, url.netloc, url.path.rstrip("/"), "", "")))
@@ -61,7 +64,8 @@ class SummaryProviderConfig:
             return None
         if not base_url or not model:
             raise ValueError("Configure both summary provider URL and model")
-        return cls(base_url, model, key, allow_http == "true", int(env.get("TRANSCRIBER_SUMMARY_TIMEOUT", "60")))
+        return cls(base_url, model, key, allow_http == "true", int(env.get("TRANSCRIBER_SUMMARY_TIMEOUT", "60")),
+                   env.get("TRANSCRIBER_SUMMARY_CACHE_EPOCH", "1"))
 
 
 def summary_capability(config):
