@@ -84,7 +84,7 @@ API contract (all routes prefixed /v1/admin/summary-provider):
 | POST /issue | none | Loopback operator only: code, expires_in |
 | POST /redeem | code | Paired bearer: token, expires_in |
 | GET /session | none | Current redacted settings and storage_error |
-| POST /discover | kind, base_url, allow_http; optional api_key, timeout, lobo_auth | Candidate description and model identifiers |
+| POST /discover | kind, base_url, allow_http; optional api_key, timeout, lobo_auth or lobo_tofu | Candidate description and model identifiers |
 | POST /discover | use_current: true | Discover at the active endpoint using its stored credential and trust |
 | POST /test-candidate | model | Synthetic inference: ok, model, elapsed_ms |
 | POST /save | confirm_egress: true | Persist and activate the tested candidate; consume grant |
@@ -97,6 +97,10 @@ For LOBO, use kind lobo, an HTTPS private IPv4 address on port 7869 ending /v1, 
 
 Probes use synthetic text only, share the summary slot, and never send an Audiobookshelf credential. Saving and disabling also share that slot so a generation request cannot see mismatched provider and cache settings. A new selection gets a new cache epoch. In-flight summary requests finish before a switch can succeed; clients should retry a busy response and reopen the audiobook to refresh capability/model state. No automatic summarization occurs. The Trainer selector is a separate implementation slice.
 
+
+## First-use LOBO trust (optional)
+
+An authorized administrator may explicitly opt into trust on first use for an unknown LOBO endpoint by sending `lobo_tofu: true` instead of `lobo_auth` with the existing LOBO discover request. The authorized session advertises `lobo_tofu_supported: true`. Discovery captures the installation CA without HTTP traffic; model discovery and synthetic inference use verified HTTPS with that CA and normal IP validation. This authenticates subsequent connections to the captured CA, but does not independently authenticate the first connection. Use only on a trusted isolated LAN. Manual AUTH verification remains available. First-use trust cannot overwrite remembered or active pins, is rejected when the trust store is unreadable, and is persisted only after successful inference and explicit consented Save. A changed certificate requires manual AUTH verification; no HTTP downgrade or automatic replacement is allowed.
 
 ## Remembered LOBO devices
 
