@@ -40,10 +40,10 @@ class DiagramJsonTests(unittest.TestCase):
         encoded = json.dumps(GRAPH)
         cases = [
             ("No JSON here.", "missing_object"),
-            (encoded + "\n" + encoded, "ambiguous_envelope"),
-            ("[" + encoded + "]", "ambiguous_envelope"),
-            ("{} " + encoded, "ambiguous_envelope"),
-            (encoded + " {", "ambiguous_envelope"),
+            (encoded + "\n" + encoded, "multiple_or_extra_objects"),
+            ("[" + encoded + "]", "array_wrapper_or_unbalanced_prose"),
+            ("{} " + encoded, "multiple_or_extra_objects"),
+            (encoded + " {", "multiple_or_extra_objects"),
             (encoded[:-1], "incomplete_object"),
             ('{"x": [}', "invalid_json"),
             ('{"x": NaN}', "invalid_json"),
@@ -63,11 +63,8 @@ class DiagramJsonTests(unittest.TestCase):
         cases = [
             {**GRAPH, "extra": True}, {**GRAPH, "direction": "BT"}, {**GRAPH, "direction": []},
             {**GRAPH, "nodes": "nodes"}, {**GRAPH, "edges": []},
-            {**GRAPH, "nodes": GRAPH["nodes"] + [{"id": "D", "label": "Unconnected"}]},
             {**GRAPH, "nodes": GRAPH["nodes"] + [{"id": "A", "label": "Duplicate"}]},
             {**GRAPH, "edges": GRAPH["edges"] + [{"from": "C", "to": "A"}]},
-            {**GRAPH, "edges": GRAPH["edges"] + [{"from": "C", "to": "C"}]},
-            {**GRAPH, "edges": GRAPH["edges"] + [{"from": "A", "to": "B"}]},
             {**GRAPH, "edges": GRAPH["edges"] + [{"from": "A", "to": "Z"}]},
             {**GRAPH, "edges": [{"from": "A", "to": "B", "label": None}]},
             {**GRAPH, "edges": [{"from": "A", "to": "B", "style": "red"}]},
@@ -83,6 +80,46 @@ class DiagramJsonTests(unittest.TestCase):
             cases.append(value)
         for graph in cases:
             with self.subTest(graph=graph), self.assertRaises(DiagramInputError):
+                parse_diagram_json(json.dumps(graph))
+
+    def test_compact_graph_and_bracketed_prose(self):
+        compact = {"nodes": ["Exercise", "Heart health", "Endurance"],
+                   "edges": [[1, 2], [2, 3, "supports"]]}
+        raw = "Here is the graph [concepts and relationships]:\n" + json.dumps(compact) + "\n[End of graph]"
+        canonical, graph = parse_diagram_json(raw)
+        self.assertEqual(graph, GRAPH)
+        self.assertEqual(parse_flowchart(canonical), (canonical, graph))
+        self.assertEqual(parse_diagram_json(json.dumps({**compact, "direction": "LR"}))[1]["direction"], "LR")
+
+    def test_redundant_nodes_and_edges_are_normalized(self):
+        compact = {"nodes": ["Exercise", "Heart health", "Endurance", "Unused"],
+                   "edges": [[1, 2], [1, 2], [2, 3, "supports"], [4, 4]]}
+        self.assertEqual(parse_diagram_json(json.dumps(compact))[1], GRAPH)
+        named = copy.deepcopy(GRAPH)
+        named["nodes"] += [{"id": "A", "label": "Exercise"}, {"id": "D", "label": "Unused"}]
+        named["edges"] += [{"from": "A", "to": "B"}, {"from": "D", "to": "D"}]
+        self.assertEqual(parse_diagram_json(json.dumps(named))[1], GRAPH)
+
+    def test_compact_graph_rejects_unknown_endpoints_and_ambiguous_content(self):
+        base = {"nodes": ["A", "B", "C"], "edges": [[1, 2], [2, 3]]}
+        cases = [
+            ({**base, "edges": [[0, 2]]}, "unknown_endpoint"),
+            ({**base, "edges": [[1, 4]]}, "unknown_endpoint"),
+            ({**base, "edges": [[True, 2]]}, "invalid_edge_index"),
+            ({**base, "edges": [[1.0, 2]]}, "invalid_edge_index"),
+            ({**base, "edges": [[1, 2, "x", "y"]]}, "invalid_index_edge"),
+            ({**base, "edges": [[1, 1]]}, "no_usable_edges"),
+            ({**base, "edges": [[1, 2], [1, 2, "different"]]}, "conflicting_edge"),
+            ({**base, "edges": [[1, 2], [2, 3], [3, 1]]}, "cyclic_graph"),
+            ({"nodes": ["A", "B", "C", "D"], "edges": [[1, 2], [3, 4]]}, "disconnected_graph"),
+            ({**base, "nodes": ["A", {"id": "B", "label": "B"}, "C"]}, "mixed_node_formats"),
+            ({**base, "nodes": ["A", "<script>", "C"]}, "invalid_label"),
+            ({**base, "nodes": ["A", "B", "<script>"], "edges": [[1, 2]]}, "invalid_label"),
+            ({**GRAPH, "nodes": GRAPH["nodes"] + [{"id": "A", "label": "Other"}]}, "conflicting_node"),
+            ({**GRAPH, "nodes": [{"id": "A", "text": "A"}, {"id": "B", "label": "B"}]}, "invalid_node_fields"),
+        ]
+        for graph, reason in cases:
+            with self.subTest(reason=reason), self.assertRaisesRegex(DiagramInputError, "^" + reason + "$"):
                 parse_diagram_json(json.dumps(graph))
 
     def test_unicode_and_label_bounds(self):
