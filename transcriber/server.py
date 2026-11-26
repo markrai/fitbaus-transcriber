@@ -261,8 +261,6 @@ class Handler(BaseHTTPRequestHandler):
                 "summary_provider_management_api": True,
                 "summary_provider_selection_api": True,
                 "summary_provider_admin_required": self.server.summary_management.settings.admin_required(),
-                "summary_provider_selection": {**describe(self.server.config.summary_provider),
-                    "storage_error": self.server.summary_settings_error},
                 "summary_lobo_trust_registry": True,
                 "recap_api": True,
                 "cumulative_recap_api": True,
@@ -277,6 +275,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(401, {"error": "unauthorized"})
             return self._json(200, {**describe(self.server.config.summary_provider),
                 "storage_error": self.server.summary_settings_error})
+        if self.path == ROOT + "/selection":
+            guard = self._device_guard()
+            if guard is None or not guard():
+                return self._json(401, {"error": "paired_device_required"})
+            service = self.server
+            return self._json(200, {**describe(service.config.summary_provider),
+                "storage_error": service.summary_settings_error,
+                "admin_required": service.summary_management.settings.admin_required()})
         if self.path == ROOT + "/session":
             return self._summary_management("status")
         if self.path == "/v1/qualification":
