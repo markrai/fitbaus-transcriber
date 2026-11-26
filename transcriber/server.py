@@ -23,7 +23,7 @@ from .qualification import inventory as qualification_inventory
 from .automatic_qualification import AutomaticQualification
 from .summary_provider import OpenAIChatProvider, SummaryProviderError, summary_capability
 from .summary_management import ADMIN_HEADER, ROOT, ManagementError, SummaryManagement, describe
-from .summaries import RecapRequest, SummaryError, SummaryRequest, generate_summary
+from .summaries import RecapRequest, SummaryError, SummaryRequest, authorize_interval, generate_summary
 from .summary_cache import SummaryCache, SummaryCacheError
 from .provider_admission import ProviderAdmission
 from .section_diagrams import DiagramCache, DiagramRequest, generate_diagram
@@ -553,7 +553,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": "invalid_request"})
         if not service.summary_slot.acquire_diagram():
             try:
-                from .summaries import authorize_interval
                 authorize_interval(request.section, token, service.runner, guard)
             except SourceError as error:
                 return self._job_error(error)
@@ -568,7 +567,8 @@ class Handler(BaseHTTPRequestHandler):
             result = generate_diagram(request, token, service.runner, provider, config, guard,
                 summary_cache=service.summary_cache, diagram_cache=service.diagram_cache,
                 source_url=service.config.source.base_url,
-                provider_current=lambda: service.summary_provider is provider and service.config.summary_provider is config)
+                provider_current=lambda: service.summary_provider is provider and service.config.summary_provider is config,
+                dispatch_allowed=service.summary_slot.diagram_dispatch_allowed)
         except (SourceError, QueueError) as error:
             return self._job_error(error)
         except SummaryError as error:
@@ -586,7 +586,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": "invalid_request"})
         finally:
             service.summary_slot.release()
-        return self._json(200, result)
+        return self._json(202 if result["state"] == "deferred" else 200, result)
 
     def _background_request(self, action, identifier=None):
         token = self._source_token()
