@@ -98,7 +98,7 @@ def _parent(request, token, runner, config, guard, cache, source_url):
 
 
 def generate_diagram(request, token, runner, provider, config, guard, *,
-                     summary_cache, diagram_cache, source_url, provider_current):
+                     summary_cache, diagram_cache, source_url, provider_current, dispatch_allowed):
     def parent():
         if not provider_current():
             raise SummaryError("diagram_parent_unavailable", 409)
@@ -109,6 +109,12 @@ def generate_diagram(request, token, runner, provider, config, guard, *,
         [SCHEMA, key, request.summary_digest, DIAGRAM_PROMPT_VERSION, PARSER_VERSION,
          DIAGRAM_PROMPT, MAX_OUTPUT_TOKENS], ensure_ascii=True, separators=(",", ":")))
     cached = diagram_cache.get(diagram_key)
+    if cached is None:
+        authorize_interval(request.section, token, runner, guard)
+        if not provider_current():
+            raise SummaryError("diagram_parent_unavailable", 409)
+        if not dispatch_allowed():
+            return request.response(state="deferred", retry_after_seconds=3)
     try:
         mermaid, graph = parse_flowchart(cached if cached is not None else provider.complete(DIAGRAM_PROMPT, summary))
     except (ValueError, UnicodeError):
