@@ -125,7 +125,7 @@ class SummaryApiTests(unittest.TestCase):
 
     def diagram_provider(self, system, text):
         self.complete(system, text)
-        return 'Here is the graph:\n\x60\x60\x60json\n{"direction":"TD","nodes":[{"id":"A","label":"First concept"},{"id":"B","label":"Second concept"}],"edges":[{"from":"A","to":"B"}]}\n\x60\x60\x60\nDone.'
+        return 'Here is the graph [concepts]:\n\x60\x60\x60json\n{"nodes":["First concept","Second concept","Unused"],"edges":[[1,2],[1,2],[3,3]]}\n\x60\x60\x60\nDone.'
 
     def test_diagram_http_cache_and_parent_authorization(self):
         body = self.diagram_body()
