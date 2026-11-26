@@ -1,9 +1,11 @@
+import json
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
 
+from transcriber.diagram_json import parse_diagram_json
 from transcriber.diagram_parser import parse_flowchart
 from transcriber.provider_admission import ProviderAdmission
 from transcriber.section_diagrams import DiagramCache, DiagramRequest, digest_text
@@ -59,6 +61,18 @@ class DiagramParserTests(unittest.TestCase):
                       {"summary_prompt_version": "recap-v1"}, {"start_ms": True}, {"summary_model": []}):
             with self.assertRaises((ValueError, TypeError)):
                 DiagramRequest.parse({**body, **extra})
+
+    def test_recovery_is_confined_to_model_input_not_canonical_validation(self):
+        raw = json.dumps({"nodes": ["Present", "Future", "Clarity"],
+                          "edges": [[1, 3], [2, 3, "compare"], [3, 4]]})
+        canonical, graph = parse_diagram_json(raw)
+        self.assertEqual(canonical, EXAMPLE)
+        with self.assertRaises(ValueError):
+            parse_flowchart(canonical + "\nC --> D")
+        with tempfile.TemporaryDirectory() as directory:
+            key = digest_text("recovered")
+            self.assertTrue(DiagramCache(directory).put(key, canonical))
+            self.assertEqual(parse_flowchart(DiagramCache(directory).get(key)), (canonical, graph))
 
     def test_cache_reopen_and_eviction(self):
         with tempfile.TemporaryDirectory() as directory:
