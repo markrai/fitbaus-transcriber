@@ -28,6 +28,7 @@ from .summaries import RecapRequest, SummaryError, SummaryRequest, authorize_int
 from .summary_cache import SummaryCache, SummaryCacheError
 from .provider_admission import ProviderAdmission
 from .section_diagrams import DiagramCache, DiagramRequest, generate_diagram
+from .section_concepts import ConceptCache, ConceptRequest, generate_concepts
 from .section_plan import SectionPlanRequest, section_plan
 from .cumulative_recap import CumulativeRecapRequest, cumulative_recap, MAX_POSITION_MS
 
@@ -55,6 +56,7 @@ class Service(ThreadingHTTPServer):
         self.config = replace(config, summary_provider=active)
         self.summary_cache = SummaryCache(config.data_dir / "summaries")
         self.diagram_cache = DiagramCache(config.data_dir / "diagrams")
+        self.concept_cache = ConceptCache(config.data_dir / "concepts")
         self.model_available = model_available or (lambda: model_present(model_directory(config.data_dir)))
         self.downloads = ModelDownloads(config.data_dir, config.model_quota_mib)
         self.dispatcher = None
@@ -133,10 +135,13 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _json(self, status, data):
-        if self.path == "/v1/section-diagrams":
+        if self.path in ("/v1/section-diagrams", "/v1/section-concepts"):
+            kind = "section_diagram" if self.path == "/v1/section-diagrams" else "section_concepts"
             code = data.get("error")
             if code in ("diagram_parent_unavailable", "invalid_diagram", "diagram_cache_unavailable",
-                        "diagram_response_too_large", "provider_authentication", "provider_rate_limited",
+                        "diagram_response_too_large", "concept_parent_unavailable", "invalid_concepts",
+                        "concept_cache_unavailable", "concept_response_too_large",
+                        "provider_authentication", "provider_rate_limited",
                         "provider_http_error", "provider_unavailable", "provider_timeout",
                         "response_too_large", "invalid_response", "invalid_completion",
                         "summary_provider_not_configured", "source_not_configured",
@@ -149,7 +154,7 @@ class Handler(BaseHTTPRequestHandler):
                 outcome = "deferred"
             else:
                 outcome = "rejected"
-            print(f"section_diagram response status={status} outcome={outcome}", file=sys.stderr, flush=True)
+            print(f"{kind} response status={status} outcome={outcome}", file=sys.stderr, flush=True)
         body = json.dumps(data, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -257,6 +262,7 @@ class Handler(BaseHTTPRequestHandler):
                 "summary_api": True,
                 "summary_diagram_api": True,
                 "summary_diagram_formats": ["flowchart"],
+                "summary_concept_api": True,
                 "summary_provider_admin_probe_api": True,
                 "summary_provider_management_api": True,
                 "summary_provider_selection_api": True,
@@ -358,8 +364,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._summary_admin_probe(self.path.endswith("/models"))
         if self.path == "/v1/section-plan":
             return self._section_plan_request()
-        if self.path == "/v1/section-diagrams":
-            return self._section_diagram_request()
+        if self.path in ("/v1/section-diagrams", "/v1/section-concepts"):
+            return self._section_visualization_request(concepts=self.path == "/v1/section-concepts")
         if self.path == "/v1/summaries":
             return self._summary_request()
         if self.path == "/v1/recaps":
@@ -570,7 +576,7 @@ class Handler(BaseHTTPRequestHandler):
             202 if result["state"] in ("pending_transcript", "pending_summary") else 200)
         return self._json(status, result)
 
-    def _section_diagram_request(self):
+    def _section_visualization_request(self, concepts):
         token = self._source_token()
         if token is None:
             return
@@ -579,7 +585,8 @@ class Handler(BaseHTTPRequestHandler):
         if service.runner is None:
             return self._json(503, {"error": "worker_unavailable"})
         try:
-            request = DiagramRequest.parse(self._body())
+            request_type = ConceptRequest if concepts else DiagramRequest
+            request = request_type.parse(self._body())
         except TimeoutError:
             return self._json(408, {"error": "request_timeout"})
         except (ValueError, TypeError, UnicodeError, RecursionError):
@@ -597,17 +604,22 @@ class Handler(BaseHTTPRequestHandler):
             config = service.config.summary_provider
             if provider is None or config is None:
                 return self._json(503, {"error": "summary_provider_not_configured"})
-            result = generate_diagram(request, token, service.runner, provider, config, guard,
-                summary_cache=service.summary_cache, diagram_cache=service.diagram_cache,
-                source_url=service.config.source.base_url,
+            options = dict(
+                summary_cache=service.summary_cache, source_url=service.config.source.base_url,
                 provider_current=lambda: service.summary_provider is provider and service.config.summary_provider is config,
                 dispatch_allowed=service.summary_slot.diagram_dispatch_allowed)
+            if concepts:
+                result = generate_concepts(request, token, service.runner, provider, config, guard,
+                                           concept_cache=service.concept_cache, **options)
+            else:
+                result = generate_diagram(request, token, service.runner, provider, config, guard,
+                                          diagram_cache=service.diagram_cache, **options)
         except (SourceError, QueueError) as error:
             return self._job_error(error)
         except SummaryError as error:
             return self._json(error.status, {"error": error.code})
         except SummaryCacheError:
-            return self._json(503, {"error": "diagram_cache_unavailable"})
+            return self._json(503, {"error": "concept_cache_unavailable" if concepts else "diagram_cache_unavailable"})
         except SummaryProviderError as error:
             code = str(error)
             if code not in ("provider_authentication", "provider_rate_limited", "provider_http_error",
