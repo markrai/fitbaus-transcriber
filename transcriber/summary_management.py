@@ -39,13 +39,20 @@ def lobo_auth(pem):
 
 
 def lobo_ca(base_url, auth):
+    if not isinstance(auth, str) or not re.fullmatch(r"[A-Za-z0-9]{4}-?[A-Za-z0-9]{4}", auth):
+        raise ManagementError("invalid_lobo_auth")
+    pem = capture_lobo_ca(base_url)
+    if not hmac.compare_digest(lobo_auth(pem), auth.upper().replace("-", "")):
+        raise ManagementError("lobo_auth_mismatch", 401)
+    return pem
+
+
+def capture_lobo_ca(base_url):
     try:
         endpoint = lobo_endpoint(base_url)
     except (ValueError, TypeError):
         raise ManagementError("lobo_private_ipv4_required") from None
     ip = endpoint.removeprefix("https://").split(":")[0]
-    if not isinstance(auth, str) or not re.fullmatch(r"[A-Za-z0-9]{4}-?[A-Za-z0-9]{4}", auth):
-        raise ManagementError("invalid_lobo_auth")
     try:
         result = subprocess.run(
             ["openssl", "s_client", "-connect", f"{ip}:7869", "-showcerts", "-no_ign_eof"],
@@ -59,8 +66,7 @@ def lobo_ca(base_url, auth):
         if len(certificates) != 2:
             raise ValueError()
         pem = certificates[1].decode("ascii")
-        if not hmac.compare_digest(lobo_auth(pem), auth.upper().replace("-", "")):
-            raise ManagementError("lobo_auth_mismatch", 401)
+        ssl.PEM_cert_to_DER_cert(pem)
         return pem
     except (OSError, ValueError, subprocess.TimeoutExpired):
         raise ManagementError("lobo_certificate_unavailable", 502) from None
@@ -199,7 +205,7 @@ class SummaryManagement:
         with self.lock:
             self.require(token, device, guard)
             if action == "status":
-                return {**describe(current), "trusted_lobo_endpoints": sorted(self.settings.trusted(current))}
+                return {**describe(current), "trusted_lobo_endpoints": sorted(self.settings.trusted(current)), "lobo_tofu_supported": True}
             if action == "forget-lobo":
                 if set(body) != {"base_url", "confirm"} or body["confirm"] is not True:
                     raise ManagementError("confirmation_required")
@@ -214,7 +220,7 @@ class SummaryManagement:
                 self.candidate = None
                 self.models = []
                 self.tested = None
-                return {**describe(current), "trusted_lobo_endpoints": sorted(self.settings.trusted(current))}
+                return {**describe(current), "trusted_lobo_endpoints": sorted(self.settings.trusted(current)), "lobo_tofu_supported": True}
             if action == "cancel":
                 self.invalidate()
                 return {"cancelled": True}
@@ -222,6 +228,11 @@ class SummaryManagement:
                 self.candidate = None
                 self.models = []
                 self.tested = None
+                if body.get("lobo_tofu") is True:
+                    try:
+                        self.settings._read(None)
+                    except (OSError, ValueError, TypeError, UnicodeError, RecursionError):
+                        raise ManagementError("lobo_trust_storage_error", 409) from None
                 candidate = self.build_candidate(body, current, self.settings.trusted(current))
                 models = OpenAIChatProvider(candidate).models()
                 self.require(token, device, guard)
@@ -266,7 +277,7 @@ class SummaryManagement:
                 raise ManagementError("summary_provider_not_configured", 503)
             return current
         required = {"kind", "base_url", "allow_http"}
-        if not required <= body.keys() or body.keys() - required - {"api_key", "lobo_auth", "timeout"}:
+        if not required <= body.keys() or body.keys() - required - {"api_key", "lobo_auth", "lobo_tofu", "timeout"}:
             raise ManagementError("invalid_request")
         kind = body["kind"]
         if kind not in ("ollama", "lobo", "custom") or type(body["allow_http"]) is not bool:
@@ -279,6 +290,8 @@ class SummaryManagement:
             api_key=body.get("api_key", ""), allow_http=body["allow_http"], timeout=body.get("timeout", 120))
         if config.base_url.startswith("http://") and config.api_key:
             raise ManagementError("https_required_for_api_key")
+        if "lobo_tofu" in body and (kind != "lobo" or body["lobo_tofu"] is not True or "lobo_auth" in body):
+            raise ManagementError("invalid_request")
         if kind == "lobo":
             if config.allow_http or config.api_key:
                 raise ManagementError("invalid_lobo_configuration")
@@ -290,7 +303,14 @@ class SummaryManagement:
                 pem = lobo_ca(endpoint, body["lobo_auth"])
             else:
                 pem = (trusted or {}).get(endpoint)
-                if pem is None:
+                active = pinned_provider(current)
+                if pem is None and active is not None and active[0] == endpoint:
+                    pem = active[1]
+                if body.get("lobo_tofu") is True:
+                    if pem is not None:
+                        raise ManagementError("lobo_already_remembered", 409)
+                    pem = capture_lobo_ca(endpoint)
+                elif pem is None:
                     raise ManagementError("lobo_identity_verification_required", 409)
             config = replace(config, ca_pem=pem)
         elif "lobo_auth" in body:
