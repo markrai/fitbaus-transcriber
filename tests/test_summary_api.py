@@ -1,4 +1,6 @@
+from contextlib import redirect_stderr
 from dataclasses import replace
+import io
 import http.client
 import json
 from pathlib import Path
@@ -125,7 +127,7 @@ class SummaryApiTests(unittest.TestCase):
 
     def diagram_provider(self, system, text):
         self.complete(system, text)
-        return 'Here is the graph [concepts]:\n\x60\x60\x60json\n{"nodes":["First concept","Second concept","Unused"],"edges":[[1,2],[1,2],[3,3]]}\n\x60\x60\x60\nDone.'
+        return 'Here is the graph [concepts]:\n\x60\x60\x60json\n{"nodes":["First concept","Second concept","Unused"],"edges":[[1,2],[1,2],[3,3],[2,4]]}\n\x60\x60\x60\nDone.'
 
     def test_diagram_http_cache_and_parent_authorization(self):
         body = self.diagram_body()
@@ -134,8 +136,18 @@ class SummaryApiTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertTrue(capabilities["summary_diagram_api"])
         self.assertEqual(capabilities["summary_diagram_formats"], ["flowchart"])
-        code, result = self.diagram(body)
+        diagnostics = io.StringIO()
+        with redirect_stderr(diagnostics):
+            code, result = self.diagram(body)
         self.assertEqual(code, 200)
+        logs = diagnostics.getvalue()
+        self.assertIn("section_diagram normalized input_nodes=3 input_edges=4", logs)
+        self.assertIn("removed_unknown_edges=1", logs)
+        self.assertIn("removed_duplicate_edges=1", logs)
+        self.assertIn("removed_self_loops=1", logs)
+        self.assertIn("removed_isolated_nodes=1 output_nodes=2 output_edges=1", logs)
+        self.assertNotIn("First concept", logs)
+        self.assertNotIn("Concise summary.", logs)
         self.assertEqual(result["schema"], "fitbaus.section-diagram/v1")
         self.assertEqual(result["state"], "ready")
         self.assertFalse(result["cache_hit"])
@@ -181,6 +193,24 @@ class SummaryApiTests(unittest.TestCase):
         self.on_complete = None
         self.assertFalse(self.diagram(body)[1]["cache_hit"])
         self.assertTrue(self.diagram(body)[1]["cache_hit"])
+
+    def test_diagram_unrecoverable_edges_are_not_cached(self):
+        body = self.diagram_body()
+
+        def unusable(system, text):
+            self.complete(system, text)
+            return '{"nodes":["One","Two"],"edges":[[1,3],[2,4]]}'
+
+        self.server.summary_provider = SimpleNamespace(complete=unusable)
+        self.assertEqual(self.diagram(body), (502, {"error": "invalid_diagram"}))
+        self.assertEqual(self.diagram(body), (502, {"error": "invalid_diagram"}))
+        self.assertEqual(len(self.calls), 3)
+        self.server.summary_provider = SimpleNamespace(complete=self.diagram_provider)
+        code, result = self.diagram(body)
+        self.assertEqual(code, 200)
+        self.assertFalse(result["cache_hit"])
+        self.assertTrue(self.diagram(body)[1]["cache_hit"])
+        self.assertEqual(len(self.calls), 4)
 
     def test_diagram_defers_when_summary_slot_busy(self):
         body = self.diagram_body()
