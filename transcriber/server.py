@@ -25,6 +25,8 @@ from .summary_provider import OpenAIChatProvider, SummaryProviderError, summary_
 from .summary_management import ADMIN_HEADER, ROOT, ManagementError, SummaryManagement, describe
 from .summaries import RecapRequest, SummaryError, SummaryRequest, generate_summary
 from .summary_cache import SummaryCache, SummaryCacheError
+from .provider_admission import ProviderAdmission
+from .section_diagrams import DiagramCache, DiagramRequest, generate_diagram
 from .section_plan import SectionPlanRequest, section_plan
 from .cumulative_recap import CumulativeRecapRequest, cumulative_recap, MAX_POSITION_MS
 
@@ -38,7 +40,7 @@ class Service(ThreadingHTTPServer):
         self.pairing = Pairing(config.data_dir)
         self.source = Audiobookshelf(config.source) if config.source else None
         self.slots = threading.BoundedSemaphore(8)
-        self.summary_slot = threading.BoundedSemaphore(1)
+        self.summary_slot = ProviderAdmission()
         self.section_plan_slot = threading.BoundedSemaphore(1)
         self.summary_management = SummaryManagement(config.data_dir)
         self.summary_settings_error = False
@@ -51,6 +53,7 @@ class Service(ThreadingHTTPServer):
             self.summary_settings_error = True
         self.config = replace(config, summary_provider=active)
         self.summary_cache = SummaryCache(config.data_dir / "summaries")
+        self.diagram_cache = DiagramCache(config.data_dir / "diagrams")
         self.model_available = model_available or (lambda: model_present(model_directory(config.data_dir)))
         self.downloads = ModelDownloads(config.data_dir, config.model_quota_mib)
         self.dispatcher = None
@@ -234,6 +237,8 @@ class Handler(BaseHTTPRequestHandler):
                 "pairing_api": True,
                 "summary_provider": summary_capability(self.server.config.summary_provider),
                 "summary_api": True,
+                "summary_diagram_api": True,
+                "summary_diagram_formats": ["flowchart"],
                 "summary_provider_admin_probe_api": True,
                 "summary_provider_management_api": True,
                 "summary_lobo_trust_registry": True,
@@ -324,6 +329,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._summary_admin_probe(self.path.endswith("/models"))
         if self.path == "/v1/section-plan":
             return self._section_plan_request()
+        if self.path == "/v1/section-diagrams":
+            return self._section_diagram_request()
         if self.path == "/v1/summaries":
             return self._summary_request()
         if self.path == "/v1/recaps":
@@ -410,7 +417,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(401, {"error": "summary_admin_unavailable"})
         service = self.server
         manager = service.summary_management
-        if not service.summary_slot.acquire(blocking=False):
+        if not service.summary_slot.acquire_foreground():
             return self._json(429, {"error": "summary_busy"})
         try:
             if action == "status":
@@ -454,7 +461,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._summary_admin_authorized():
             return self._json(401, {"error": "unauthorized"})
         service = self.server
-        if not service.summary_slot.acquire(blocking=False):
+        if not service.summary_slot.acquire_foreground():
             return self._json(429, {"error": "summary_busy"})
         try:
             if service.summary_provider is None:
@@ -494,7 +501,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(408, {"error": "request_timeout"})
         except (ValueError, TypeError, UnicodeError, RecursionError):
             return self._json(400, {"error": "invalid_request"})
-        if not service.summary_slot.acquire(blocking=False):
+        if not service.summary_slot.acquire_foreground():
             return self._json(429, {"error": "summary_busy"})
         try:
             if service.summary_provider is None:
@@ -529,6 +536,57 @@ class Handler(BaseHTTPRequestHandler):
         status = 409 if result["state"] == "missing_transcript" else (
             202 if result["state"] in ("pending_transcript", "pending_summary") else 200)
         return self._json(status, result)
+
+    def _section_diagram_request(self):
+        token = self._source_token()
+        if token is None:
+            return
+        service = self.server
+        guard = self._device_guard()
+        if service.runner is None:
+            return self._json(503, {"error": "worker_unavailable"})
+        try:
+            request = DiagramRequest.parse(self._body())
+        except TimeoutError:
+            return self._json(408, {"error": "request_timeout"})
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            return self._json(400, {"error": "invalid_request"})
+        if not service.summary_slot.acquire_diagram():
+            try:
+                from .summaries import authorize_interval
+                authorize_interval(request.section, token, service.runner, guard)
+            except SourceError as error:
+                return self._job_error(error)
+            except (ValueError, TypeError, UnicodeError, RecursionError):
+                return self._json(400, {"error": "invalid_request"})
+            return self._json(202, request.response(state="deferred", retry_after_seconds=3))
+        try:
+            provider = service.summary_provider
+            config = service.config.summary_provider
+            if provider is None or config is None:
+                return self._json(503, {"error": "summary_provider_not_configured"})
+            result = generate_diagram(request, token, service.runner, provider, config, guard,
+                summary_cache=service.summary_cache, diagram_cache=service.diagram_cache,
+                source_url=service.config.source.base_url,
+                provider_current=lambda: service.summary_provider is provider and service.config.summary_provider is config)
+        except (SourceError, QueueError) as error:
+            return self._job_error(error)
+        except SummaryError as error:
+            return self._json(error.status, {"error": error.code})
+        except SummaryCacheError:
+            return self._json(503, {"error": "diagram_cache_unavailable"})
+        except SummaryProviderError as error:
+            code = str(error)
+            if code not in ("provider_authentication", "provider_rate_limited", "provider_http_error",
+                            "provider_unavailable", "provider_timeout", "response_too_large",
+                            "invalid_response", "invalid_completion"):
+                code = "provider_unavailable"
+            return self._json(504 if code == "provider_timeout" else 502, {"error": code})
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            return self._json(400, {"error": "invalid_request"})
+        finally:
+            service.summary_slot.release()
+        return self._json(200, result)
 
     def _background_request(self, action, identifier=None):
         token = self._source_token()
