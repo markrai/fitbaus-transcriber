@@ -78,3 +78,47 @@ Ten-minute leaves are reduced chronologically in groups of at most four, with si
 One new provider call is allowed per HTTP request, sharing the existing single summary admission slot. The client explicitly polls the same position after HTTP 202 `pending_summary`; every request rechecks source/device authorization and current full coverage. Partial work is persisted as ordinary cached nodes; no background task, credentials, raw transcript, or separate progress database is retained. HTTP 200 `ready` returns a completed recap; `empty` returns null without model inference. For 200/202 responses, `schema: fitbaus.cumulative-recap/v1`, `algorithm: cumulative-v1`, `position_ms`, `start_ms: 0`, `end_ms`, identity, model, prompt_version, transcript_digest, completed_nodes and total_nodes identify the snapshot and progress. A ready response includes summary and cache_hit. Progress is for the current snapshot, not a durable job counter: changes to available profiles, cache eviction or other requests can reduce it. Provider/cache errors stop the current request; previously cached nodes remain reusable. No partial recap is returned as complete.
 
 A cold long book may require many explicit polls and model calls; the hierarchy reduces repeated work, not initial preparation cost. Repeated compression can omit details. The model may hallucinate or introduce prior knowledge despite the prompts. No strict end-to-end deadline or automatic background recap generation is introduced. Trainer adoption is a separate phase; existing summary, section-plan and recent-recap clients remain unchanged.
+
+
+## Section diagrams (Phase 1)
+
+The optional authenticated capabilities fields `summary_diagram_api: true` and `summary_diagram_formats: ["flowchart"]` advertise the server contract independently of provider configuration. Trainer adoption is a later phase. Existing LOBO and other compatible providers require no changes.
+
+`POST /v1/section-diagrams` uses the same device/operator bearer and current Audiobookshelf token as summaries. The exact JSON keys are:
+
+```json
+{
+  "source_id": "home-library",
+  "item_id": "book-1",
+  "audio_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "start_ms": 180000,
+  "end_ms": 540000,
+  "transcript_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "summary_model": "lobo-nano",
+  "summary_prompt_version": "section-v1",
+  "summary_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+}
+```
+
+The summary digest is SHA-256 of the exact UTF-8 ready summary text. The server revalidates book/device authorization, exact audio revision and interval, preferred existing transcript snapshots, current provider namespace and parent summary cache entry. No client text, model override, retry option, URL or prompt is accepted. Missing/changed parent yields 409 `diagram_parent_unavailable`. No transcription scheduling or summary regeneration occurs. Only the authoritative parent summary (not additional transcript text or source credentials) reaches the provider with a fixed diagram prompt. It may contain the same spoilers or inaccuracies as its parent.
+
+HTTP 200 returns `schema: "fitbaus.section-diagram/v1"`, echoed request identity, `diagram_prompt_version: "flowchart-v1"`, `parser_version: "flowchart-subset-v1"`, `state: "ready"`, `cache_hit`, canonical Mermaid source and a normalized graph. Example graph:
+
+```json
+{
+  "direction": "TD",
+  "nodes": [
+    {"id": "A", "label": "First concept"},
+    {"id": "B", "label": "Second concept"}
+  ],
+  "edges": [
+    {"from": "A", "to": "B", "label": "leads to"}
+  ]
+}
+```
+
+The strict line-oriented grammar accepts `flowchart TD` or `flowchart LR`, explicit declarations such as `A["First concept"]`, then edges such as `A --> B` or `A -->|"leads to"| B`. A single exact outer Mermaid fence may be removed. The graph must be connected and acyclic, 2–10 unique nodes and 1–16 unique directed edges, labels at most 64/24 Unicode code points respectively. No arbitrary Mermaid directives, HTML, entities, scripts, link handlers, styles, control characters, or executable rendering. Source is bounded to 8 KiB, normalized response to 32 KiB, provider completion to the existing output limits. Malformed outputs fail as 502 `invalid_diagram`, with no repair call or partial result. Clients must independently validate the graph and render plain labels natively.
+
+Diagrams use the shared provider admission coordinator. Busy diagrams return HTTP 202 `state: "deferred"`, `retry_after_seconds: 3` with echoed identity and versions, no graph or retained credentials. A busy response checks source/device access and interval, and defers expensive parent validation until admission. Foreground summary/recap/management requests have priority: one waiter may wait up to 120 seconds behind an admitted diagram; competing foreground requests still receive 429 `summary_busy`. A waiting foreground request suppresses speculative provider dispatch before inference starts and receives the next slot. Once started, an OpenAI-compatible provider call cannot necessarily be interrupted; the provider timeout is not a hard process deadline. Do not claim preemption. The client must bound deferred retries and discard obsolete responses. No server-side background queue or automatic retries.
+
+Successful canonical Mermaid source is stored in `diagrams/diagrams.sqlite3`; normalized graph is reconstructed and validated on every hit. Separate LRU budget: 1,024 rows, 8 MiB payload, 24 MiB SQLite page cap. Cache key includes the full parent summary cache identity, exact summary digest, diagram prompt/version, parser version and output limit. Source permissions, current parent and provider identity are checked before inference and again before publication; stale or invalid results do not populate the cache. Cache errors return 503 `diagram_cache_unavailable`. Existing summary cache limits are unchanged. Protect diagram data and backups as private derived audiobook content.
