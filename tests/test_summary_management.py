@@ -67,6 +67,39 @@ class StorageTests(unittest.TestCase):
             with self.assertRaises(ManagementError):
                 manager.require(grant, "device", lambda: True)
 
+    def test_optional_admin_policy_persists_and_open_grants_cannot_change_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = SummaryManagement(directory)
+            guard = lambda: True
+            def execute(action, body, token, device="bike"):
+                return manager.execute(action, body, token, device, guard, None, lambda *_: None)
+            self.assertFalse(manager.settings.admin_required())
+            token = manager.open_session("bike", guard)["token"]
+            self.assertFalse(execute("status", {}, token)["administrator"])
+            with self.assertRaises(ManagementError):
+                execute("policy", {"admin_required": True}, token)
+            with self.assertRaises(ManagementError):
+                execute("status", {}, token, "other")
+            other = manager.open_session("other", guard)["token"]
+            with self.assertRaises(ManagementError):
+                execute("status", {}, token)
+            self.assertFalse(execute("status", {}, other, "other")["administrator"])
+            code = manager.issue()["code"]
+            manager.open_session("bike", guard)
+            admin = manager.redeem(code, "bike")["token"]
+            self.assertTrue(execute("policy", {"admin_required": True}, admin)["admin_required"])
+            manager = SummaryManagement(directory)
+            self.assertTrue(manager.settings.admin_required())
+            with self.assertRaises(ManagementError):
+                manager.open_session("bike", guard)
+            admin = manager.redeem(manager.issue()["code"], "bike")["token"]
+            self.assertFalse(execute("policy", {"admin_required": False}, admin)["admin_required"])
+            self.assertFalse(SummaryManagement(directory).settings.admin_required())
+            with self.assertRaises(ManagementError):
+                manager.open_session("bike", lambda: False)
+            manager.settings.policy_path.write_text("invalid")
+            self.assertTrue(manager.settings.admin_required())
+
     def test_lobo_auth_pins_only_verified_ca(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
@@ -325,6 +358,16 @@ class ManagementApiTests(unittest.TestCase):
                 try:
                     self.assertEqual(call("POST", "/issue")[0], 401)
                     self.assertEqual(call("GET", "/session")[0], 401)
+                    self.assertEqual(call("POST", "/open", device=config.token, body={})[0], 401)
+                    status, data = call("POST", "/open", body={})
+                    self.assertEqual(status, 200)
+                    open_grant = data["token"]
+                    self.assertEqual(call("GET", "/session", grant=open_grant)[1]["model"], "old")
+                    self.assertEqual(call("POST", "/policy", grant=open_grant, body={"admin_required": True})[0], 401)
+                    self.assertEqual(call("POST", "/cancel", grant=open_grant, body={})[0], 200)
+                    grant = authorize()
+                    self.assertEqual(call("POST", "/policy", grant=grant, body={"admin_required": True})[0], 200)
+                    self.assertEqual(call("POST", "/open", body={})[0], 401)
                     grant = authorize()
                     self.assertEqual(call("GET", "/session", device=other, grant=grant)[0], 401)
                     self.assertEqual(call("GET", "/session", grant=grant)[1]["model"], "old")

@@ -85,6 +85,25 @@ def describe(config):
 class SummarySettings:
     def __init__(self, directory):
         self.path = Path(directory) / "summary-provider.json"
+        self.policy_path = Path(directory) / "summary-provider-policy.json"
+
+    def admin_required(self):
+        try:
+            with self.policy_path.open("rb") as source:
+                raw = source.read(1025)
+            value = json.loads(raw)
+            if len(raw) > 1024 or not isinstance(value, dict) or set(value) != {"admin_required"} or type(value["admin_required"]) is not bool:
+                return True
+            return value["admin_required"]
+        except FileNotFoundError:
+            return False
+        except (OSError, ValueError, TypeError, RecursionError):
+            return True
+
+    def set_admin_required(self, required):
+        if type(required) is not bool:
+            raise ValueError("Invalid administration policy")
+        self._write(self.policy_path, json.dumps({"admin_required": required}).encode("ascii"))
 
     def _read(self, fallback):
         if not self.path.exists():
@@ -137,13 +156,18 @@ class SummarySettings:
         raw = json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("ascii")
         if len(raw) > MAX_PERSISTED_SETTINGS_BYTES:
             raise ValueError("Invalid saved summary settings")
-        fd, name = tempfile.mkstemp(prefix=".summary-provider-", dir=self.path.parent)
+        self._write(self.path, raw)
+
+    @staticmethod
+    def _write(path, raw):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix=".summary-provider-", dir=path.parent)
         try:
             with os.fdopen(fd, "wb") as output:
                 output.write(raw)
                 output.flush()
                 os.fsync(output.fileno())
-            os.replace(name, self.path)
+            os.replace(name, path)
         finally:
             if os.path.exists(name):
                 os.unlink(name)
@@ -159,9 +183,11 @@ class SummaryManagement:
     def invalidate(self):
         with self.lock:
             self.code = None
+            self.code_deadline = 0
             self.deadline = 0
             self.remaining = 0
             self.grant = None
+            self.admin_grant = False
             self.device = None
             self.candidate = None
             self.models = []
@@ -172,7 +198,7 @@ class SummaryManagement:
             self.invalidate()
             self.code = "".join(secrets.choice(ALPHABET) for _ in range(8))
             self.remaining = MAX_ATTEMPTS
-            self.deadline = self.clock() + TTL_SECONDS
+            self.code_deadline = self.clock() + TTL_SECONDS
             return {"code": self.code[:4] + "-" + self.code[4:], "expires_in": TTL_SECONDS}
 
     @staticmethod
@@ -181,31 +207,59 @@ class SummaryManagement:
 
     def redeem(self, code, device):
         with self.lock:
-            if not self.code or self.clock() >= self.deadline or self.remaining <= 0:
+            if not self.code or self.clock() >= self.code_deadline or self.remaining <= 0:
                 raise ManagementError("summary_admin_unavailable", 401)
             self.remaining -= 1
             if not isinstance(code, str) or not hmac.compare_digest(
                 code.strip().upper().replace("-", "").encode("utf-8"), self.code.encode("ascii")
             ):
                 raise ManagementError("invalid_summary_admin_code", 401)
-            token = secrets.token_urlsafe(32)
-            self.code = None
-            self.grant = self.digest(token)
-            self.device = self.digest(device)
-            self.deadline = self.clock() + TTL_SECONDS
-            return {"token": token, "expires_in": TTL_SECONDS}
+            return self._grant(device, administrator=True)
+
+    def _grant(self, device, administrator):
+        self.invalidate()
+        token = secrets.token_urlsafe(32)
+        self.grant = self.digest(token)
+        self.admin_grant = administrator
+        self.device = self.digest(device)
+        self.deadline = self.clock() + TTL_SECONDS
+        return {"token": token, "expires_in": TTL_SECONDS}
+
+    def open_session(self, device, guard):
+        with self.lock:
+            if not guard() or self.settings.admin_required():
+                raise ManagementError("summary_admin_unavailable", 401)
+            if self.admin_grant and self.grant and self.clock() < self.deadline and self.device != self.digest(device):
+                raise ManagementError("summary_busy", 409)
+            pending_code = (self.code, self.code_deadline, self.remaining)
+            result = self._grant(device, administrator=False)
+            self.code, self.code_deadline, self.remaining = pending_code
+            return result
+
 
     def require(self, token, device, guard):
         if (not self.grant or self.clock() >= self.deadline or not token
                 or not hmac.compare_digest(self.grant, self.digest(token))
-                or not hmac.compare_digest(self.device, self.digest(device)) or not guard()):
+                or not hmac.compare_digest(self.device, self.digest(device)) or not guard()
+                or (not self.admin_grant and self.settings.admin_required())):
             raise ManagementError("summary_admin_unavailable", 401)
 
     def execute(self, action, body, token, device, guard, current, activate):
         with self.lock:
             self.require(token, device, guard)
             if action == "status":
-                return {**describe(current), "trusted_lobo_endpoints": sorted(self.settings.trusted(current)), "lobo_tofu_supported": True}
+                return {**describe(current), "trusted_lobo_endpoints": sorted(self.settings.trusted(current)),
+                        "lobo_tofu_supported": True, "admin_required": self.settings.admin_required(),
+                        "administrator": self.admin_grant}
+            if action == "policy":
+                if not self.admin_grant:
+                    raise ManagementError("summary_admin_unavailable", 401)
+                if set(body) != {"admin_required"} or type(body["admin_required"]) is not bool:
+                    raise ManagementError("invalid_request")
+                self.require(token, device, guard)
+                self.settings.set_admin_required(body["admin_required"])
+                self.invalidate()
+                return {"admin_required": body["admin_required"]}
             if action == "forget-lobo":
                 if set(body) != {"base_url", "confirm"} or body["confirm"] is not True:
                     raise ManagementError("confirmation_required")
@@ -220,7 +274,9 @@ class SummaryManagement:
                 self.candidate = None
                 self.models = []
                 self.tested = None
-                return {**describe(current), "trusted_lobo_endpoints": sorted(self.settings.trusted(current)), "lobo_tofu_supported": True}
+                return {**describe(current), "trusted_lobo_endpoints": sorted(self.settings.trusted(current)),
+                        "lobo_tofu_supported": True, "admin_required": self.settings.admin_required(),
+                        "administrator": self.admin_grant}
             if action == "cancel":
                 self.invalidate()
                 return {"cancelled": True}
