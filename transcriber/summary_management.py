@@ -125,8 +125,10 @@ class SummarySettings:
         except ValueError:
             raise ManagementError("lobo_trust_registry_full_or_invalid", 409) from None
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        raw = json.dumps({"version": 2, "provider": asdict(config) if config else None, "lobo_trust": registry},
-                         ensure_ascii=True, separators=(",", ":")).encode("ascii")
+        value = {"version": 1, "provider": asdict(config) if config else None}
+        if registry:
+            value.update(version=2, lobo_trust=registry)
+        raw = json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("ascii")
         if len(raw) > MAX_PERSISTED_SETTINGS_BYTES:
             raise ValueError("Invalid saved summary settings")
         fd, name = tempfile.mkstemp(prefix=".summary-provider-", dir=self.path.parent)

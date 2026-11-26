@@ -2,6 +2,7 @@ import http.client
 import json
 from pathlib import Path
 import re
+import socket
 import ssl
 import subprocess
 import tempfile
@@ -95,7 +96,8 @@ class LoboTrustRegistryTests(unittest.TestCase):
         path = Path(directory)
         subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
             "-keyout", str(path / (name + ".key")), "-out", str(path / (name + ".pem")),
-            "-subj", "/CN=" + name, "-days", "1"], check=True,
+            "-subj", "/CN=" + name, "-days", "1",
+            "-addext", "subjectAltName=IP:192.168.1.200"], check=True,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return (path / (name + ".pem")).read_text()
 
@@ -189,6 +191,45 @@ class LoboTrustRegistryTests(unittest.TestCase):
             settings.save(None, previous=current)
             self.assertEqual(settings.trusted(None)[endpoint], original)
             self.assertEqual(json.loads(settings.path.read_text())["version"], 2)
+
+    def test_remembered_pin_rejects_replaced_certificate_in_real_tls_handshake(self):
+        with tempfile.TemporaryDirectory() as directory:
+            endpoint = "https://192.168.1.200:7869/v1"
+            original = self.make_ca(directory, "old")
+            self.make_ca(directory, "new")
+            config = SummaryManagement.build_candidate(
+                {"kind": "lobo", "base_url": endpoint, "allow_http": False},
+                None, {endpoint: original})
+            self.assertTrue(config.tls_context().check_hostname)
+            self.assertEqual(config.tls_context().verify_mode, ssl.CERT_REQUIRED)
+
+            def handshake(name):
+                server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                server_context.load_cert_chain(str(Path(directory) / (name + ".pem")),
+                                               str(Path(directory) / (name + ".key")))
+                local, peer = socket.socketpair()
+                local.settimeout(3)
+                peer.settimeout(3)
+                def serve():
+                    try:
+                        with server_context.wrap_socket(local, server_side=True):
+                            pass
+                    except (OSError, ssl.SSLError):
+                        pass
+                    finally:
+                        local.close()
+                worker = threading.Thread(target=serve)
+                worker.start()
+                try:
+                    with config.tls_context().wrap_socket(peer, server_hostname="192.168.1.200"):
+                        pass
+                finally:
+                    peer.close()
+                    worker.join(timeout=5)
+                    self.assertFalse(worker.is_alive())
+            handshake("old")
+            with self.assertRaises(ssl.SSLCertVerificationError):
+                handshake("new")
 
     def test_corrupted_registry_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
