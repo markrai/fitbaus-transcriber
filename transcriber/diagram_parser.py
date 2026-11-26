@@ -11,10 +11,11 @@ _EDGE = re.compile(r'(' + _ID + r') -->(?:\|"([^"\n]*)"\|)? (' + _ID + r')')
 
 
 def _label(value, maximum):
-    value = value.strip()
-    if (not 1 <= len(value) <= maximum
-            or any(c in '<>"\\|[]' or unicodedata.category(c).startswith("C")
+    if (any(c in '<>"\\|[]' or unicodedata.category(c).startswith("C")
                    or unicodedata.category(c) in ("Zl", "Zp") for c in value)):
+        raise ValueError("Invalid diagram label")
+    value = value.strip()
+    if not 1 <= len(value) <= maximum or re.search(r"&(?:#[0-9]+|#x[0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);", value):
         raise ValueError("Invalid diagram label")
     return value
 
