@@ -205,6 +205,8 @@ class SummaryManagement:
                 entry = pinned_provider(current)
                 if entry is not None and entry[0] == endpoint:
                     raise ManagementError("lobo_trust_active", 409)
+                if endpoint not in self.settings.trusted(current):
+                    raise ManagementError("lobo_trust_not_found", 404)
                 self.require(token, device, guard)
                 self.settings.save(current, previous=current, forget=endpoint)
                 self.candidate = None
