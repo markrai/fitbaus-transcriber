@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import logging
 import math
 import subprocess
 import threading
@@ -11,6 +12,7 @@ from .model import model_spec, model_directory, model_present
 SAMPLE_RATE = 16_000
 BYTES_PER_MS = 32
 MAX_DECODE_BYTES = MAX_WINDOW_MS * BYTES_PER_MS
+TIMESTAMP_TOLERANCE_MS = 1000
 ENGINE_ID = model_spec().engine_id
 FORMATS = "aac,mp3,mov,mp4,m4a,3gp,3g2,mj2,flac,wav,ogg,matroska,webm,asf,aiff"
 
@@ -76,29 +78,77 @@ def decode_pcm(file, start_ms, end_ms, timeout=120):
     return pcm[:expected]
 
 
-def _segment_ms(value):
-    if type(value) not in (int, float) or not math.isfinite(value) or not -1 <= value <= 301:
+def _segment_ms(value, duration_ms):
+    tolerance = TIMESTAMP_TOLERANCE_MS / 1000
+    if (type(value) not in (int, float)
+            or not -tolerance <= value <= duration_ms / 1000 + tolerance
+            or not math.isfinite(value)):
         raise EngineError("invalid_model_timestamp")
     return math.floor(value * 1000 + 0.5)
 
 
-def normalize_segments(segments, start_ms, end_ms):
+def _timestamp_diagnostic(value):
+    if type(value) not in (int, float):
+        return "non_numeric"
+    if type(value) is float and not math.isfinite(value):
+        return "nan" if math.isnan(value) else ("positive_infinity" if value > 0 else "negative_infinity")
+    if not -1_000_000_000 <= value <= 1_000_000_000:
+        return "outside_log_range"
+    return f"{value:.6f}"
+
+
+def normalize_segments(segments, start_ms, end_ms, *, audio_duration_ms=None):
+    requested_duration = end_ms - start_ms
+    duration_ms = requested_duration if audio_duration_ms is None else audio_duration_ms
+    if (type(start_ms) is not int or type(end_ms) is not int or start_ms < 0
+            or not 0 < requested_duration <= MAX_WINDOW_MS
+            or type(duration_ms) is not int or not 0 <= duration_ms <= requested_duration):
+        raise ValueError("Invalid normalization range")
+    audio_end = start_ms + duration_ms
     cues = []
     previous_end = start_ms
+    invalid = 0
+    discarded = 0
+    clamped = 0
+    first_invalid = None
     for index, segment in enumerate(segments):
         if index >= MAX_CUES:
             raise EngineError("model_cue_limit")
         text = " ".join(segment.text.split())
         if not text:
             continue
-        start = max(previous_end, start_ms + _segment_ms(segment.start))
-        end = min(end_ms, start_ms + _segment_ms(segment.end))
+        try:
+            relative_start = _segment_ms(segment.start, duration_ms)
+            relative_end = _segment_ms(segment.end, duration_ms)
+            if segment.start > segment.end:
+                raise EngineError("invalid_model_timestamp")
+        except EngineError:
+            invalid += 1
+            discarded += 1
+            if first_invalid is None:
+                first_invalid = (index, _timestamp_diagnostic(segment.start), _timestamp_diagnostic(segment.end))
+            continue
+        if relative_start < 0 or relative_end > duration_ms:
+            clamped += 1
+        start = max(previous_end, start_ms + relative_start)
+        end = min(audio_end, start_ms + relative_end)
         if start >= end:
+            discarded += 1
             continue
         if len(text) > MAX_CUE_CHARS:
             raise EngineError("model_text_limit")
         cues.append(Cue(start, end, text))
         previous_end = end
+    if invalid or clamped:
+        sample = first_invalid if first_invalid is not None else ("none", "none", "none")
+        logging.getLogger("transcriber.diagnostics").warning(
+            "transcription_timestamp_normalization start_ms=%d end_ms=%d audio_duration_ms=%d "
+            "accepted=%d discarded=%d invalid=%d clamped=%d first_invalid_index=%s "
+            "first_invalid_start_s=%s first_invalid_end_s=%s",
+            start_ms, end_ms, duration_ms, len(cues), discarded, invalid, clamped, *sample,
+        )
+    if invalid and not cues:
+        raise EngineError("invalid_model_timestamp")
     return tuple(cues)
 
 
@@ -139,7 +189,7 @@ class WhisperCpuEngine:
                     beam_size=1, best_of=1, temperature=0.0,
                     condition_on_previous_text=False, vad_filter=True,
                 )
-                return normalize_segments(segments, start_ms, end_ms)
+                return normalize_segments(segments, start_ms, end_ms, audio_duration_ms=len(pcm) // BYTES_PER_MS)
             except EngineError:
                 raise
             except Exception as error:
