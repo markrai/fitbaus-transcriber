@@ -12,7 +12,8 @@ import time
 from .audiobookshelf import Audiobookshelf, SourceConfig, SourceError, valid_bearer
 from .contract import AudioIdentity, Cue, SCHEMA, TranscriptWindow
 from .engine import EngineConfig, EngineError, WhisperCpuEngine, transcribe_window
-from .diagnostics import ENGINE_FAILURES, EXCEPTION_TYPES, exception_type, safe_exit_status
+from .diagnostics import (ENGINE_FAILURES, EXCEPTION_TYPES, MAX_TIMESTAMP_REPORTS, exception_type,
+                          safe_exit_status, validate_timestamp_report, log_timestamp_report)
 from .jobs import MAX_RESULT_BYTES, QueueError
 
 POLL_SECONDS = 0.1
@@ -88,6 +89,13 @@ def supervise(payload, timeout, cancelled, lock_fd, command=None, spawn=subproce
             result = json.loads(output)
             if not isinstance(result, dict):
                 raise ValueError
+            reports = result.pop("timestamp_diagnostics", [])
+            if type(reports) is not list or len(reports) > MAX_TIMESTAMP_REPORTS:
+                raise ValueError
+            for report in reports:
+                validate_timestamp_report(report, payload["start_ms"], payload["end_ms"])
+            for report in reports:
+                log_timestamp_report(report)
             if set(result) == {"source_error"}:
                 code = result["source_error"]
                 raise SourceError(code if code in SOURCE_ERRORS else "source_failed")
@@ -193,12 +201,19 @@ def worker(parent):
         raise ValueError("Invalid source credential")
     output = sys.stdout
     sys.stdout = sys.stderr
+    reports = []
+
+    def collect_timestamp_report(report):
+        if len(reports) < MAX_TIMESTAMP_REPORTS:
+            reports.append(report)
+
     try:
         source_config = SourceConfig(**request["source"])
         source = SpoolSource(source_config, request["spool"]) if "spool" in request else Audiobookshelf(source_config)
         identity = AudioIdentity(**request["identity"])
         engine = WhisperCpuEngine(Path(request["directory"]), EngineConfig(**request["engine"]),
-                                  model_name=request.get("model", "tiny"))
+                                  model_name=request.get("model", "tiny"),
+                                  report_timestamp=collect_timestamp_report)
         window = transcribe_window(source, identity, request["token"], Path(request["directory"]),
                                    engine, request["start_ms"], request["end_ms"])
         result = json.dumps(window.to_json(), ensure_ascii=True, separators=(",", ":"))
@@ -215,6 +230,9 @@ def worker(parent):
     except ValueError as error:
         response = json.dumps({"error": "invalid_transcript",
                                "exception_type": exception_type(error), "exit_status": None})
+    if reports:
+        response = response[:-1] + ',"timestamp_diagnostics":' + json.dumps(
+            reports, ensure_ascii=True, separators=(",", ":")) + "}"
     output.write(response)
     output.flush()
 
