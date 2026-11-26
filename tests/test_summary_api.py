@@ -175,6 +175,86 @@ class SummaryApiTests(unittest.TestCase):
         self.assertEqual(self.diagram(body)[0], 409)
         self.assertEqual(len(self.calls), 2)
 
+    def concepts(self, body, **kwargs):
+        return self.request(body, path="/v1/section-concepts", **kwargs)
+
+    def concept_provider(self, system, text):
+        self.complete(system, text)
+        return "Key concepts:\n- First concept\n2. A separate idea\n- first concept"
+
+    def test_concept_http_identity_cache_and_flowchart_coexistence(self):
+        body = self.diagram_body()
+        self.server.summary_provider = SimpleNamespace(complete=self.concept_provider)
+        code, caps = self.request(path="/v1/capabilities", method="GET")
+        self.assertEqual(code, 200)
+        self.assertTrue(caps["summary_concept_api"])
+        self.assertTrue(caps["summary_diagram_api"])
+        self.assertEqual(caps["summary_diagram_formats"], ["flowchart"])
+        diagnostics = io.StringIO()
+        with redirect_stderr(diagnostics):
+            code, result = self.concepts(body)
+        self.assertEqual(code, 200)
+        self.assertIn("section_concepts validated count=2", diagnostics.getvalue())
+        self.assertNotIn("First concept", diagnostics.getvalue())
+        self.assertEqual(result["schema"], "fitbaus.section-concepts/v1")
+        self.assertEqual(result["state"], "ready")
+        self.assertFalse(result["cache_hit"])
+        self.assertEqual(result["concepts"], ["First concept", "A separate idea"])
+        self.assertNotIn("graph", result)
+        self.assertNotIn("mermaid", result)
+        for key, value in body.items():
+            self.assertEqual(result[key], value)
+        self.assertEqual(self.calls[-1][1], "Concise summary.")
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.transcriptions, [])
+        self.server.summary_provider = SimpleNamespace(complete=self.diagram_provider)
+        self.assertEqual(self.diagram(body)[0], 200)
+        self.assertEqual(len(self.calls), 3)
+        self.failure = "provider_unavailable"
+        self.assertTrue(self.concepts(body)[1]["cache_hit"])
+        self.assertTrue(self.diagram(body)[1]["cache_hit"])
+        self.assertEqual(self.concepts(body, user="denied")[0], 403)
+        self.assertEqual(self.concepts(body, operator=None)[0], 401)
+        self.assertEqual(self.concepts(body, user=None)[0], 401)
+        self.assertEqual(self.concepts({**body, "summary_digest": "c" * 64})[0], 409)
+        self.assertEqual(self.concepts({**body, "transcript_digest": "d" * 64})[0], 409)
+        self.assertEqual(self.concepts({**body, "summary_model": "other"})[0], 409)
+        self.assertEqual(self.concepts({**body, "prompt": "override"})[0], 400)
+        config = self.server.config
+        self.server.config = replace(config, summary_provider=replace(config.summary_provider, cache_epoch="2"))
+        self.assertEqual(self.concepts(body)[0], 409)
+        self.assertEqual(len(self.calls), 3)
+
+    def test_concept_deferral_and_failed_output_never_cache(self):
+        body = self.diagram_body()
+        self.server.summary_provider = SimpleNamespace(complete=self.concept_provider)
+        self.assertTrue(self.server.summary_slot.acquire_foreground())
+        try:
+            code, result = self.concepts(body)
+            self.assertEqual(code, 202)
+            self.assertEqual(result["state"], "deferred")
+            self.assertNotIn("concepts", result)
+            self.assertEqual(self.concepts(body, user="denied")[0], 403)
+            self.assertEqual(len(self.calls), 1)
+        finally:
+            self.server.summary_slot.release()
+
+        def unusable(system, text):
+            self.complete(system, text)
+            return "Concepts:\n---"
+
+        self.server.summary_provider = SimpleNamespace(complete=unusable)
+        self.assertEqual(self.concepts(body), (502, {"error": "invalid_concepts"}))
+        self.assertEqual(self.concepts(body), (502, {"error": "invalid_concepts"}))
+        self.server.summary_provider = SimpleNamespace(complete=self.concept_provider)
+        _, device = self.server.pairing.redeem(self.server.pairing.issue())
+        self.on_complete = self.server.pairing.revoke_all
+        self.assertEqual(self.concepts(body, operator=device["token"]), (401, {"error": "unauthorized"}))
+        self.on_complete = None
+        self.assertFalse(self.concepts(body)[1]["cache_hit"])
+        self.assertTrue(self.concepts(body)[1]["cache_hit"])
+        self.assertEqual(len(self.calls), 5)
+
     def test_diagram_missing_parent_never_schedules_transcript(self):
         body = {**self.body(0, 10000), "transcript_digest": "a" * 64,
                 "summary_model": "test-model", "summary_prompt_version": "section-v1", "summary_digest": "b" * 64}
