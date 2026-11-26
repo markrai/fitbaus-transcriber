@@ -80,9 +80,13 @@ class StorageTests(unittest.TestCase):
                 execute("policy", {"admin_required": True}, token)
             with self.assertRaises(ManagementError):
                 execute("status", {}, token, "other")
+            other = manager.open_session("other", guard)["token"]
             with self.assertRaises(ManagementError):
-                manager.open_session("other", guard)
-            admin = manager.redeem(manager.issue()["code"], "bike")["token"]
+                execute("status", {}, token)
+            self.assertFalse(execute("status", {}, other, "other")["administrator"])
+            code = manager.issue()["code"]
+            manager.open_session("bike", guard)
+            admin = manager.redeem(code, "bike")["token"]
             self.assertTrue(execute("policy", {"admin_required": True}, admin)["admin_required"])
             manager = SummaryManagement(directory)
             self.assertTrue(manager.settings.admin_required())
