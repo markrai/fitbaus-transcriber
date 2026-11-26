@@ -101,6 +101,56 @@ class LoboTrustRegistryTests(unittest.TestCase):
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return (path / (name + ".pem")).read_text()
 
+    def test_first_use_trust_requires_explicit_opt_in_and_cannot_replace_a_pin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            endpoint = "https://192.168.1.200:7869/v1"
+            pem = self.make_ca(directory, "first-use")
+            body = {"kind": "lobo", "base_url": endpoint, "allow_http": False}
+            with patch("transcriber.summary_management.capture_lobo_ca", return_value=pem) as capture:
+                with self.assertRaisesRegex(ManagementError, "lobo_identity_verification_required"):
+                    SummaryManagement.build_candidate(body, None, {})
+                for extra in ({"lobo_tofu": False}, {"lobo_tofu": 1},
+                              {"lobo_tofu": True, "lobo_auth": "ABCD-EFGH"}):
+                    with self.assertRaisesRegex(ManagementError, "invalid_request"):
+                        SummaryManagement.build_candidate({**body, **extra}, None, {})
+                candidate = SummaryManagement.build_candidate({**body, "lobo_tofu": True}, None, {})
+                self.assertEqual(candidate.ca_pem, pem)
+                self.assertTrue(candidate.tls_context().check_hostname)
+                self.assertEqual(candidate.tls_context().verify_mode, ssl.CERT_REQUIRED)
+                for current, trusted in ((None, {endpoint: pem}), (candidate, {})):
+                    with self.assertRaisesRegex(ManagementError, "lobo_already_remembered"):
+                        SummaryManagement.build_candidate({**body, "lobo_tofu": True}, current, trusted)
+                capture.assert_called_once_with(endpoint)
+
+    def test_first_use_pin_is_saved_only_after_test_and_consented_save(self):
+        with tempfile.TemporaryDirectory() as directory:
+            endpoint = "https://192.168.1.200:7869/v1"
+            pem = self.make_ca(directory, "first-use")
+            manager = SummaryManagement(directory)
+            grant = manager.redeem(manager.issue()["code"], "device")["token"]
+            def call(action, body):
+                return manager.execute(action, body, grant, "device", lambda: True, None, lambda *args: None)
+            body = {"kind": "lobo", "base_url": endpoint, "allow_http": False, "lobo_tofu": True}
+            provider = Mock()
+            provider.models.return_value = ["lobo-nano"]
+            with patch("transcriber.summary_management.capture_lobo_ca", return_value=pem), \
+                 patch("transcriber.summary_management.OpenAIChatProvider", return_value=provider):
+                self.assertTrue(call("status", {})["lobo_tofu_supported"])
+                call("discover", body)
+                self.assertEqual(manager.settings.trusted(None), {})
+                with self.assertRaises(ManagementError):
+                    call("save", {"confirm_egress": True})
+                call("test", {"model": "lobo-nano"})
+                self.assertEqual(manager.settings.trusted(None), {})
+                call("save", {"confirm_egress": True})
+                self.assertEqual(manager.settings.trusted(None), {endpoint: pem})
+            grant = manager.redeem(manager.issue()["code"], "device")["token"]
+            manager.settings.path.write_text("corrupted")
+            with patch("transcriber.summary_management.capture_lobo_ca") as capture:
+                with self.assertRaisesRegex(ManagementError, "lobo_trust_storage_error"):
+                    call("discover", body)
+                capture.assert_not_called()
+
     def test_verified_saved_devices_survive_switch_disable_and_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             one = "https://192.168.1.200:7869/v1"
