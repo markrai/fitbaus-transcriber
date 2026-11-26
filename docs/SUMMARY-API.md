@@ -132,3 +132,22 @@ The server emits sanitized stderr events for diagram response status, allowliste
 Diagrams use the shared provider admission coordinator. Busy diagrams return HTTP 202 `state: "deferred"`, `retry_after_seconds: 3` with echoed identity and versions, no graph or retained credentials. A busy response checks source/device access and interval, and defers expensive parent validation until admission. Foreground summary/recap/management requests have priority: one waiter may wait up to 120 seconds behind an admitted diagram; competing foreground requests still receive 429 `summary_busy`. A waiting foreground request suppresses speculative provider dispatch before inference starts and receives the next slot. Once started, an OpenAI-compatible provider call cannot necessarily be interrupted; the provider timeout is not a hard process deadline. Do not claim preemption. The client must bound deferred retries and discard obsolete responses. No server-side background queue or automatic retries.
 
 Successful canonical Mermaid source is stored in `diagrams/diagrams.sqlite3`; normalized graph is reconstructed and validated on every hit. Separate LRU budget: 1,024 rows, 8 MiB payload, 24 MiB SQLite page cap. Cache key includes the full parent summary cache identity, exact summary digest, diagram prompt/version, internal generation namespace, parser version and output limit. Source permissions, current parent and provider identity are checked before inference and again before publication; stale or invalid results do not populate the cache. Cache errors return 503 `diagram_cache_unavailable`. Existing summary cache limits are unchanged. Protect diagram data and backups as private derived audiobook content.
+
+
+## Concept Canvas
+
+A separate optional visualization for small local models is advertised by `summary_concept_api: true` in capabilities. Existing `summary_diagram_api` and `summary_diagram_formats: ["flowchart"]` remain supported. Clients should choose one visualization per visible section rather than speculatively generating both.
+
+POST `/v1/section-concepts` uses the exact same nine-field section identity, source authorization, paired/operator bearer authentication and authoritative cached summary as `/v1/section-diagrams`. It does not accept client-supplied summary text, schedule transcription, or generate a missing parent summary. The provider, model and cache epoch are tied to the authoritative summary. The same speculative admission slot, foreground priority and authorization rechecks apply.
+
+The model is asked to return about six standalone concepts or meaningful short ideas in the summary's language, one per line. No graph or structured model output is required. The bounded parser accepts plain lines, ordinary bullets, numbering, surrounding whitespace and common Markdown emphasis/fences, skips recognizable headings and unusable lines, and deduplicates using Unicode normalization and case folding while preserving original text and order. Up to ten usable snippets of 140 Unicode code points each are retained; the raw model text is limited to 8 KiB. Independent ideas are permitted. No extra relationship, ranking, or semantic inference is introduced by the parser. A single usable idea is sufficient; zero usable ideas yields 502 `invalid_concepts`. A successful result does not certify factual accuracy.
+
+Response echoes all nine request fields and includes:
+
+- `schema: "fitbaus.section-concepts/v1"`
+- `concept_prompt_version: "concepts-v1"`
+- `concept_input_version: "plain-lines-v1"`
+- For HTTP 200, `state: "ready"`, Boolean `cache_hit` and `concepts`, an array of 1–10 bounded plain-text strings. No graph or Mermaid source.
+- For HTTP 202, `state: "deferred"` and `retry_after_seconds: 3`, without concepts.
+
+A stale or missing parent yields 409 `concept_parent_unavailable`; invalid cache storage yields 503 `concept_cache_unavailable`. Other admission, authorization and provider errors follow the existing flowchart contract. Response size is limited to 32 KiB. Concept entries use a separate versioned cache at `concepts/concepts.sqlite3` (1,024 entries, 4 MiB payload budget, 12 MiB SQLite page limit), and are validated again on retrieval. Existing diagram and summary cache namespaces are unchanged. Sanitized `section_concepts` logs contain status, outcome, count and timing, not raw content. The client owns visual layout and should render snippets as plain text without imposing causal links.
