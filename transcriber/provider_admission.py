@@ -29,6 +29,10 @@ class ProviderAdmission:
             self._active = "diagram"
             return True
 
+    def diagram_dispatch_allowed(self):
+        with self._condition:
+            return self._active == "diagram" and not self._waiting
+
     def acquire(self, blocking=True):
         with self._condition:
             if blocking:
