@@ -259,6 +259,10 @@ class Handler(BaseHTTPRequestHandler):
                 "summary_diagram_formats": ["flowchart"],
                 "summary_provider_admin_probe_api": True,
                 "summary_provider_management_api": True,
+                "summary_provider_selection_api": True,
+                "summary_provider_admin_required": self.server.summary_management.settings.admin_required(),
+                "summary_provider_selection": {**describe(self.server.config.summary_provider),
+                    "storage_error": self.server.summary_settings_error},
                 "summary_lobo_trust_registry": True,
                 "recap_api": True,
                 "cumulative_recap_api": True,
@@ -341,7 +345,8 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 manager.lock.release()
         if self.path in (ROOT + "/redeem", ROOT + "/discover", ROOT + "/test-candidate",
-                         ROOT + "/save", ROOT + "/disable", ROOT + "/cancel", ROOT + "/forget-lobo"):
+                         ROOT + "/save", ROOT + "/disable", ROOT + "/cancel", ROOT + "/forget-lobo",
+                         ROOT + "/open", ROOT + "/policy"):
             return self._summary_management(self.path.rsplit("/", 1)[1])
         if self.path in ("/v1/admin/summary-provider/models", "/v1/admin/summary-provider/test"):
             return self._summary_admin_probe(self.path.endswith("/models"))
@@ -431,7 +436,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(401, {"error": "unauthorized"})
         device = self.headers["Authorization"][7:]
         values = self.headers.get_all(ADMIN_HEADER) or []
-        if action != "redeem" and (len(values) != 1 or not re.fullmatch(r"[A-Za-z0-9_-]{43}", values[0])):
+        if action not in ("redeem", "open") and (len(values) != 1 or not re.fullmatch(r"[A-Za-z0-9_-]{43}", values[0])):
             return self._json(401, {"error": "summary_admin_unavailable"})
         service = self.server
         manager = service.summary_management
@@ -448,6 +453,10 @@ class Handler(BaseHTTPRequestHandler):
                 if set(body) != {"code"}:
                     raise ValueError()
                 result = manager.redeem(body["code"], device)
+            elif action == "open":
+                if body:
+                    raise ValueError()
+                result = manager.open_session(device, guard)
             else:
                 result = manager.execute("test" if action == "test-candidate" else action,
                     body, values[0], device, guard, service.config.summary_provider, service.activate_summary_provider)
