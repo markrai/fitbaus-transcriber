@@ -18,6 +18,7 @@ from transcriber.runner import JobRunner
 from transcriber.server import Service
 from transcriber.summaries import RecapRequest, SummaryRequest
 from transcriber.summary_cache import SummaryCache
+from transcriber.section_diagrams import DiagramCache, digest_text
 from transcriber.summary_provider import SummaryProviderConfig, SummaryProviderError
 
 
@@ -109,6 +110,116 @@ class SummaryApiTests(unittest.TestCase):
         for start, end, cues in windows:
             store.checkpoint(job, TranscriptWindow(IDENTITY, start, end, tuple(cues)))
             job = store.get(job.id)
+
+    def diagram_body(self, summary=None):
+        if summary is None:
+            self.prepare([(0, 300000, [Cue(1000, 2000, "first")])])
+            code, summary = self.request(self.body(0, 10000))
+            self.assertEqual(code, 200)
+        return {**self.body(0, 10000), "transcript_digest": summary["transcript_digest"],
+                "summary_model": summary["model"], "summary_prompt_version": summary["prompt_version"],
+                "summary_digest": digest_text(summary["summary"])}
+
+    def diagram(self, body, **kwargs):
+        return self.request(body, path="/v1/section-diagrams", **kwargs)
+
+    def diagram_provider(self, system, text):
+        self.complete(system, text)
+        return 'flowchart TD\nA["First concept"]\nB["Second concept"]\nA --> B'
+
+    def test_diagram_http_cache_and_parent_authorization(self):
+        body = self.diagram_body()
+        self.server.summary_provider = SimpleNamespace(complete=self.diagram_provider)
+        code, capabilities = self.request(path="/v1/capabilities", method="GET")
+        self.assertEqual(code, 200)
+        self.assertTrue(capabilities["summary_diagram_api"])
+        self.assertEqual(capabilities["summary_diagram_formats"], ["flowchart"])
+        code, result = self.diagram(body)
+        self.assertEqual(code, 200)
+        self.assertEqual(result["schema"], "fitbaus.section-diagram/v1")
+        self.assertEqual(result["state"], "ready")
+        self.assertFalse(result["cache_hit"])
+        self.assertEqual(result["graph"]["edges"], [{"from": "A", "to": "B"}])
+        for key, value in body.items():
+            self.assertEqual(result[key], value)
+        self.assertEqual(self.calls[-1][1], "Concise summary.")
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.transcriptions, [])
+        self.server.diagram_cache = DiagramCache(self.server.config.data_dir / "diagrams")
+        self.failure = "provider_unavailable"
+        self.assertTrue(self.diagram(body)[1]["cache_hit"])
+        self.assertEqual(self.diagram(body, user="denied")[0], 403)
+        self.assertEqual(self.diagram(body, operator=None)[0], 401)
+        self.assertEqual(self.diagram(body, user=None)[0], 401)
+        self.assertEqual(self.diagram({**body, "summary_digest": "c" * 64})[0], 409)
+        self.assertEqual(self.diagram({**body, "transcript_digest": "d" * 64})[0], 409)
+        self.assertEqual(self.diagram({**body, "summary_model": "another-model"})[0], 409)
+        self.assertEqual(self.diagram({**body, "prompt": "override"})[0], 400)
+        config = self.server.config
+        self.server.config = replace(config, summary_provider=replace(config.summary_provider, cache_epoch="2"))
+        self.assertEqual(self.diagram(body)[0], 409)
+        self.assertEqual(len(self.calls), 2)
+
+    def test_diagram_missing_parent_never_schedules_transcript(self):
+        body = {**self.body(0, 10000), "transcript_digest": "a" * 64,
+                "summary_model": "test-model", "summary_prompt_version": "section-v1", "summary_digest": "b" * 64}
+        self.assertEqual(self.diagram(body), (409, {"error": "diagram_parent_unavailable"}))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.transcriptions, [])
+
+    def test_diagram_invalid_graph_and_revocation_never_cache(self):
+        body = self.diagram_body()
+        self.server.summary_provider = SimpleNamespace(complete=self.complete)
+        self.assertEqual(self.diagram(body), (502, {"error": "invalid_diagram"}))
+        _, device = self.server.pairing.redeem(self.server.pairing.issue())
+        self.server.summary_provider = SimpleNamespace(complete=self.diagram_provider)
+        self.on_complete = self.server.pairing.revoke_all
+        self.assertEqual(self.diagram(body, operator=device["token"]), (401, {"error": "unauthorized"}))
+        self.on_complete = None
+        self.assertFalse(self.diagram(body)[1]["cache_hit"])
+        self.assertTrue(self.diagram(body)[1]["cache_hit"])
+
+    def test_diagram_defers_when_summary_slot_busy(self):
+        body = self.diagram_body()
+        self.server.summary_provider = SimpleNamespace(complete=self.diagram_provider)
+        self.assertTrue(self.server.summary_slot.acquire_foreground())
+        try:
+            code, deferred = self.diagram(body)
+            self.assertEqual(code, 202)
+            self.assertEqual(deferred["state"], "deferred")
+            self.assertNotIn("graph", deferred)
+            self.assertEqual(len(self.calls), 1)
+            self.assertEqual(self.diagram(body, user="denied")[0], 403)
+        finally:
+            self.server.summary_slot.release()
+        self.assertEqual(self.diagram(body)[0], 200)
+
+    def test_foreground_summary_admitted_before_next_diagram(self):
+        body = self.diagram_body()
+        self.server.summary_provider = SimpleNamespace(complete=self.diagram_provider)
+        self.entered.clear()
+        self.release.clear()
+        diagram_results, summary_results = [], []
+        diagram_worker = threading.Thread(target=lambda: diagram_results.append(self.diagram(body)))
+        summary_worker = threading.Thread(target=lambda: summary_results.append(self.request(self.body(0, 10000))))
+        diagram_worker.start()
+        try:
+            self.assertTrue(self.entered.wait(3))
+            summary_worker.start()
+            deadline = time.monotonic() + 2
+            while self.server.summary_slot.diagram_dispatch_allowed() and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertFalse(self.server.summary_slot.diagram_dispatch_allowed())
+            self.assertEqual(self.diagram(body)[0], 202)
+        finally:
+            self.release.set()
+            diagram_worker.join(7)
+            if summary_worker.ident is not None:
+                summary_worker.join(7)
+        self.assertEqual(diagram_results[0][0], 200)
+        self.assertEqual(summary_results[0][0], 200)
+        self.assertTrue(summary_results[0][1]["cache_hit"])
+        self.assertEqual(len(self.calls), 2)
 
     def test_pending_then_generates_from_verified_live_windows(self):
         code, result = self.request(self.body())

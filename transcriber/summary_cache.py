@@ -39,6 +39,8 @@ def cache_key(request, source_url, config, transcript_digest, prompt_version, pr
 
 
 class SummaryCache:
+    PAGE_LIMIT_BYTES = MAX_BYTES * 2 + 4 * 1024 * 1024
+
     def __init__(self, directory, max_entries=MAX_ENTRIES, max_bytes=MAX_BYTES):
         if not 1 <= max_entries <= MAX_ENTRIES or not 1 <= max_bytes <= MAX_BYTES:
             raise ValueError("Invalid summary cache limits")
@@ -57,7 +59,7 @@ class SummaryCache:
             db = sqlite3.connect(self.path, timeout=5, isolation_level=None)
             db.execute("PRAGMA synchronous=FULL")
             page_size = db.execute("PRAGMA page_size").fetchone()[0]
-            db.execute(f"PRAGMA max_page_count={(MAX_BYTES * 2 + 4 * 1024 * 1024) // page_size}")
+            db.execute(f"PRAGMA max_page_count={self.PAGE_LIMIT_BYTES // page_size}")
             db.execute("BEGIN IMMEDIATE")
             db.execute("""CREATE TABLE IF NOT EXISTS summaries (
                 key TEXT PRIMARY KEY, summary TEXT NOT NULL,

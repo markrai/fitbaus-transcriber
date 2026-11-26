@@ -151,6 +151,29 @@ def validate_window(job, identity, start, end):
         raise SummaryError("invalid_transcript", 502) from None
 
 
+def section_snapshot(request, snapshots, prompt):
+    is_recap = isinstance(request, RecapRequest)
+    digest = hashlib.sha256()
+    cues = []
+    size = len(prompt.encode("utf-8"))
+    for profile, window in snapshots:
+        if is_recap:
+            heard = [[cue.start_ms, cue.end_ms, cue.text] for cue in window.cues
+                     if cue.start_ms >= request.start_ms and cue.end_ms <= request.end_ms]
+            snapshot = ["recap-v1", profile, window.start_ms, heard]
+        else:
+            snapshot = [profile, window.to_json()]
+        digest.update(json.dumps(snapshot, separators=(",", ":"), sort_keys=True,
+                                 ensure_ascii=True).encode("ascii"))
+        for cue in window.cues:
+            if cue.start_ms >= request.start_ms and cue.end_ms <= request.end_ms:
+                size += len(cue.text.encode("utf-8")) + (1 if cues else 0)
+                if size > MAX_INPUT_BYTES:
+                    raise SummaryError("summary_input_too_large", 413)
+                cues.append(cue.text)
+    return digest.hexdigest(), cues
+
+
 def generate_summary(request, token, runner, dispatcher, provider, config, readiness, guard=None, *, cache, source_url):
     is_recap = isinstance(request, RecapRequest)
     prompt = RECAP_PROMPT if is_recap else SYSTEM_PROMPT
@@ -180,25 +203,8 @@ def generate_summary(request, token, runner, dispatcher, provider, config, readi
     authorize_interval(request, token, runner, guard)
     if pending:
         return request.response(state="pending_transcript", pending_windows=pending)
-    digest = hashlib.sha256()
-    cues = []
-    size = len(prompt.encode("utf-8"))
-    for profile, window in snapshots:
-        if is_recap:
-            heard = [[cue.start_ms, cue.end_ms, cue.text] for cue in window.cues
-                     if cue.start_ms >= request.start_ms and cue.end_ms <= request.end_ms]
-            snapshot = ["recap-v1", profile, window.start_ms, heard]
-        else:
-            snapshot = [profile, window.to_json()]
-        digest.update(json.dumps(snapshot, separators=(",", ":"), sort_keys=True,
-                                 ensure_ascii=True).encode("ascii"))
-        for cue in window.cues:
-            if cue.start_ms >= request.start_ms and cue.end_ms <= request.end_ms:
-                size += len(cue.text.encode("utf-8")) + (1 if cues else 0)
-                if size > MAX_INPUT_BYTES:
-                    raise SummaryError("summary_input_too_large", 413)
-                cues.append(cue.text)
-    fields = {"model": config.model, "prompt_version": prompt_version, "transcript_digest": digest.hexdigest()}
+    digest, cues = section_snapshot(request, snapshots, prompt)
+    fields = {"model": config.model, "prompt_version": prompt_version, "transcript_digest": digest}
     if not cues:
         return request.response(state="empty", summary=None, **fields)
     key = cache_key(request, source_url, config, fields["transcript_digest"],
