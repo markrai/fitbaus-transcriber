@@ -125,7 +125,7 @@ class SummaryApiTests(unittest.TestCase):
 
     def diagram_provider(self, system, text):
         self.complete(system, text)
-        return 'flowchart TD\nA["First concept"]\nB["Second concept"]\nA --> B'
+        return 'Here is the graph:\n\x60\x60\x60json\n{"direction":"TD","nodes":[{"id":"A","label":"First concept"},{"id":"B","label":"Second concept"}],"edges":[{"from":"A","to":"B"}]}\n\x60\x60\x60\nDone.'
 
     def test_diagram_http_cache_and_parent_authorization(self):
         body = self.diagram_body()
@@ -140,6 +140,9 @@ class SummaryApiTests(unittest.TestCase):
         self.assertEqual(result["state"], "ready")
         self.assertFalse(result["cache_hit"])
         self.assertEqual(result["graph"]["edges"], [{"from": "A", "to": "B"}])
+        self.assertEqual(result["mermaid"], 'flowchart TD\nA["First concept"]\nB["Second concept"]\nA --> B')
+        self.assertEqual(result["diagram_prompt_version"], "flowchart-v1")
+        self.assertEqual(result["parser_version"], "flowchart-subset-v1")
         for key, value in body.items():
             self.assertEqual(result[key], value)
         self.assertEqual(self.calls[-1][1], "Concise summary.")

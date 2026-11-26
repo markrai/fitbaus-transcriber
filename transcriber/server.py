@@ -4,6 +4,7 @@ import json
 import threading
 import re
 import sqlite3
+import sys
 import time
 from dataclasses import replace
 
@@ -132,6 +133,23 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _json(self, status, data):
+        if self.path == "/v1/section-diagrams":
+            code = data.get("error")
+            if code in ("diagram_parent_unavailable", "invalid_diagram", "diagram_cache_unavailable",
+                        "diagram_response_too_large", "provider_authentication", "provider_rate_limited",
+                        "provider_http_error", "provider_unavailable", "provider_timeout",
+                        "response_too_large", "invalid_response", "invalid_completion",
+                        "summary_provider_not_configured", "source_not_configured",
+                        "source_credential_required", "worker_unavailable", "invalid_request",
+                        "request_timeout", "unauthorized", "forbidden", "not_found"):
+                outcome = code
+            elif status == 200:
+                outcome = "cache_hit" if data.get("cache_hit") is True else "ready"
+            elif status == 202:
+                outcome = "deferred"
+            else:
+                outcome = "rejected"
+            print(f"section_diagram response status={status} outcome={outcome}", file=sys.stderr, flush=True)
         body = json.dumps(data, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
