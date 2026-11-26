@@ -153,6 +153,31 @@ class CapabilityTests(unittest.TestCase):
                     self.assertNotIn("private-key", body)
                     self.assertNotIn("unreachable.example", body)
                     self.assertFalse(json.loads(body)["transcription"])
+                    self.assertTrue(json.loads(body)["summary_provider_selection_api"])
+                    paired = server.pairing.redeem(server.pairing.issue())[1]["token"]
+                    client.request("GET", "/v1/capabilities", headers={"Authorization": "Bearer " + paired})
+                    response = client.getresponse()
+                    self.assertEqual(response.status, 200)
+                    body = response.read().decode()
+                    self.assertNotIn("unreachable.example", body)
+                    self.assertNotIn("private-key", body)
+                    client.request("GET", "/v1/admin/summary-provider/selection",
+                                   headers={"Authorization": "Bearer " + paired})
+                    response = client.getresponse()
+                    self.assertEqual(response.status, 200)
+                    body = response.read().decode()
+                    selection = json.loads(body)
+                    self.assertEqual(selection["base_url"], provider.base_url)
+                    self.assertEqual(selection["model"], provider.model)
+                    self.assertTrue(selection["has_api_key"])
+                    self.assertFalse(selection["admin_required"])
+                    self.assertNotIn("private-key", body)
+                    for token in (config.token, "invalid"):
+                        client.request("GET", "/v1/admin/summary-provider/selection",
+                                       headers={"Authorization": "Bearer " + token})
+                        response = client.getresponse()
+                        self.assertEqual(response.status, 401)
+                        self.assertNotIn("unreachable.example", response.read().decode())
                 finally:
                     client.close()
             finally:
