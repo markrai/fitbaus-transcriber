@@ -86,6 +86,30 @@ print(json.dumps({"window": {"schema": "fitbaus.transcript/v1", **p["identity"],
             self.run_code("import os; os._exit(7)")
         self.assertEqual(caught.exception.exit_status, 7)
 
+    def test_timestamp_diagnostics_cross_worker_boundary_without_raw_stderr(self):
+        report = {
+            "start_ms": 0, "end_ms": 1000, "audio_duration_ms": 1000,
+            "accepted": 1, "discarded": 1, "invalid": 1, "clamped": 0,
+            "first_invalid_index": 0, "first_invalid_start_s": "0.000000",
+            "first_invalid_end_s": "302.500000",
+        }
+        code = self.valid_code().replace('{"window": {', '{"timestamp_diagnostics": ' + repr([report]) + ', "window": {')
+        with self.assertLogs("transcriber.diagnostics", level="WARNING") as logs:
+            self.assertEqual(self.run_code(code).cues[0].text, "Narration")
+        self.assertIn("first_invalid_end_s=302.500000", logs.output[0])
+        self.assertNotIn("Narration", logs.output[0])
+        failure = {"error": "invalid_model_timestamp", "exception_type": None, "exit_status": None,
+                   "timestamp_diagnostics": [dict(report, accepted=0)]}
+        with self.assertLogs("transcriber.diagnostics", level="WARNING"):
+            with self.assertRaisesRegex(EngineError, "invalid_model_timestamp"):
+                self.run_code("print(" + repr(json.dumps(failure)) + ")")
+        for reports in ([dict(report, first_invalid_end_s="private credential")],
+                        [dict(report, start_ms=-1)], [dict(report, accepted=True)],
+                        [dict(report, unexpected="private")], [report] * 3):
+            bad = dict(failure, timestamp_diagnostics=reports)
+            with self.assertRaisesRegex(EngineError, "invalid_worker_result"):
+                self.run_code("print(" + repr(json.dumps(bad)) + ")")
+
     def test_credentials_not_in_arguments_or_environment(self):
         code = """import json, os, sys
 p = json.load(sys.stdin)
