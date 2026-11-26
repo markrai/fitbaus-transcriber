@@ -1,12 +1,11 @@
 from dataclasses import dataclass
-import logging
 import math
 import subprocess
 import threading
 
 from .audiobookshelf import SourceError
 from .contract import Cue, MAX_CUE_CHARS, MAX_CUES, MAX_WINDOW_MS, TranscriptWindow
-from .diagnostics import exception_type, safe_exit_status
+from .diagnostics import exception_type, safe_exit_status, log_timestamp_report
 from .model import model_spec, model_directory, model_present
 
 SAMPLE_RATE = 16_000
@@ -97,7 +96,7 @@ def _timestamp_diagnostic(value):
     return f"{value:.6f}"
 
 
-def normalize_segments(segments, start_ms, end_ms, *, audio_duration_ms=None):
+def normalize_segments(segments, start_ms, end_ms, *, audio_duration_ms=None, report_timestamp=log_timestamp_report):
     requested_duration = end_ms - start_ms
     duration_ms = requested_duration if audio_duration_ms is None else audio_duration_ms
     if (type(start_ms) is not int or type(end_ms) is not int or start_ms < 0
@@ -141,22 +140,23 @@ def normalize_segments(segments, start_ms, end_ms, *, audio_duration_ms=None):
         previous_end = end
     if invalid or clamped:
         sample = first_invalid if first_invalid is not None else ("none", "none", "none")
-        logging.getLogger("transcriber.diagnostics").warning(
-            "transcription_timestamp_normalization start_ms=%d end_ms=%d audio_duration_ms=%d "
-            "accepted=%d discarded=%d invalid=%d clamped=%d first_invalid_index=%s "
-            "first_invalid_start_s=%s first_invalid_end_s=%s",
-            start_ms, end_ms, duration_ms, len(cues), discarded, invalid, clamped, *sample,
-        )
+        report_timestamp({
+            "start_ms": start_ms, "end_ms": end_ms, "audio_duration_ms": duration_ms,
+            "accepted": len(cues), "discarded": discarded, "invalid": invalid, "clamped": clamped,
+            "first_invalid_index": sample[0], "first_invalid_start_s": sample[1],
+            "first_invalid_end_s": sample[2],
+        })
     if invalid and not cues:
         raise EngineError("invalid_model_timestamp")
     return tuple(cues)
 
 
 class WhisperCpuEngine:
-    def __init__(self, data_dir, config=EngineConfig(), *, model_name="tiny"):
+    def __init__(self, data_dir, config=EngineConfig(), *, model_name="tiny", report_timestamp=log_timestamp_report):
         self.model_name = model_name
         self.path = model_directory(data_dir, model_name)
         self.config = config
+        self.report_timestamp = report_timestamp
         self._model = None
         self._lock = threading.Lock()
 
@@ -189,7 +189,8 @@ class WhisperCpuEngine:
                     beam_size=1, best_of=1, temperature=0.0,
                     condition_on_previous_text=False, vad_filter=True,
                 )
-                return normalize_segments(segments, start_ms, end_ms, audio_duration_ms=len(pcm) // BYTES_PER_MS)
+                return normalize_segments(segments, start_ms, end_ms, audio_duration_ms=len(pcm) // BYTES_PER_MS,
+                                          report_timestamp=self.report_timestamp)
             except EngineError:
                 raise
             except Exception as error:
