@@ -2,7 +2,10 @@ import copy
 import json
 import unittest
 
-from transcriber.diagram_json import DiagramInputError, extract_object, parse_diagram_json
+from transcriber.diagram_json import (
+    DiagramInputError, MAX_INPUT_EDGES, MAX_INPUT_NODES, NormalizationStats,
+    extract_object, parse_diagram_json, parse_diagram_result,
+)
 from transcriber.diagram_parser import parse_flowchart
 
 
@@ -65,7 +68,6 @@ class DiagramJsonTests(unittest.TestCase):
             {**GRAPH, "nodes": "nodes"}, {**GRAPH, "edges": []},
             {**GRAPH, "nodes": GRAPH["nodes"] + [{"id": "A", "label": "Duplicate"}]},
             {**GRAPH, "edges": GRAPH["edges"] + [{"from": "C", "to": "A"}]},
-            {**GRAPH, "edges": GRAPH["edges"] + [{"from": "A", "to": "Z"}]},
             {**GRAPH, "edges": [{"from": "A", "to": "B", "label": None}]},
             {**GRAPH, "edges": [{"from": "A", "to": "B", "style": "red"}]},
         ]
@@ -100,11 +102,12 @@ class DiagramJsonTests(unittest.TestCase):
         named["edges"] += [{"from": "A", "to": "B"}, {"from": "D", "to": "D"}]
         self.assertEqual(parse_diagram_json(json.dumps(named))[1], GRAPH)
 
-    def test_compact_graph_rejects_unknown_endpoints_and_ambiguous_content(self):
+    def test_compact_graph_rejects_ambiguous_or_unusable_content(self):
         base = {"nodes": ["A", "B", "C"], "edges": [[1, 2], [2, 3]]}
         cases = [
-            ({**base, "edges": [[0, 2]]}, "unknown_endpoint"),
-            ({**base, "edges": [[1, 4]]}, "unknown_endpoint"),
+            ({**base, "edges": [[1, 2], [0, 2]]}, "ambiguous_index_base"),
+            ({**base, "edges": [[1, 2], [-1, 2]]}, "invalid_edge_index"),
+            ({**base, "edges": [[1, 4]]}, "no_usable_edges"),
             ({**base, "edges": [[True, 2]]}, "invalid_edge_index"),
             ({**base, "edges": [[1.0, 2]]}, "invalid_edge_index"),
             ({**base, "edges": [[1, 2, "x", "y"]]}, "invalid_index_edge"),
@@ -121,6 +124,69 @@ class DiagramJsonTests(unittest.TestCase):
         for graph, reason in cases:
             with self.subTest(reason=reason), self.assertRaisesRegex(DiagramInputError, "^" + reason + "$"):
                 parse_diagram_json(json.dumps(graph))
+
+    def test_dangling_edges_are_removed_without_reindexing(self):
+        raw = {"nodes": ["One", "Unused", "Three", "Four"],
+               "edges": [[1, 3, "leads to"], [3, 4], [4, 9], [1, 10**100]]}
+        result = parse_diagram_result(json.dumps(raw))
+        self.assertEqual(result.graph, {
+            "direction": "TD",
+            "nodes": [{"id": "A", "label": "One"}, {"id": "C", "label": "Three"},
+                      {"id": "D", "label": "Four"}],
+            "edges": [{"from": "A", "to": "C", "label": "leads to"}, {"from": "C", "to": "D"}],
+        })
+        self.assertEqual(result.stats, NormalizationStats(4, 4, 0, 2, 0, 0, 1, 3, 2))
+        self.assertTrue(result.stats.changed)
+        self.assertEqual(parse_flowchart(result.mermaid), (result.mermaid, result.graph))
+
+    def test_named_nodes_and_edges_share_normalization(self):
+        raw = copy.deepcopy(GRAPH)
+        raw["nodes"] += [{"id": "A", "label": "Exercise"}, {"id": "D", "label": "Unused"}]
+        raw["edges"] += [{"from": "A", "to": "B"}, {"from": "D", "to": "Z"},
+                         {"from": "D", "to": "D"}]
+        result = parse_diagram_result(json.dumps(raw))
+        self.assertEqual(result.graph, GRAPH)
+        self.assertEqual(result.stats, NormalizationStats(5, 5, 1, 1, 1, 1, 1, 3, 2))
+        self.assertEqual(parse_diagram_result(json.dumps(GRAPH)).stats,
+                         NormalizationStats(3, 2, 0, 0, 0, 0, 0, 3, 2))
+        self.assertFalse(parse_diagram_result(json.dumps(GRAPH)).stats.changed)
+
+    def test_raw_bounds_allow_redundancy_but_output_bounds_remain_strict(self):
+        nodes = ["Node " + str(i) for i in range(1, MAX_INPUT_NODES + 1)]
+        edges = [[1, 24]] * MAX_INPUT_EDGES
+        result = parse_diagram_result(json.dumps({"nodes": nodes, "edges": edges}))
+        self.assertEqual(result.graph["nodes"], [{"id": "A", "label": "Node 1"},
+                                                {"id": "X", "label": "Node 24"}])
+        self.assertEqual(result.stats, NormalizationStats(24, 48, 0, 0, 47, 0, 22, 2, 1))
+        for value, reason in (
+            ({"nodes": nodes + ["Extra"], "edges": [[1, 2]]}, "invalid_cardinality"),
+            ({"nodes": nodes, "edges": edges + [[1, 2]]}, "invalid_cardinality"),
+            ({"nodes": nodes[:11], "edges": [[i, i + 1] for i in range(1, 11)]}, "output_cardinality"),
+            ({"nodes": nodes[:7], "edges": [[i, j] for i in range(1, 8)
+                                         for j in range(i + 1, 8)]}, "output_cardinality"),
+        ):
+            with self.subTest(reason=reason), self.assertRaisesRegex(DiagramInputError, "^" + reason + "$"):
+                parse_diagram_json(json.dumps(value))
+
+    def test_cleanup_does_not_hide_invalid_content_or_topology(self):
+        base = {"nodes": ["One", "Two", "Three", "Four"], "edges": [[1, 2]]}
+        cases = [
+            ({**base, "edges": [[1, 2], [5, 1, "<unsafe>"]]}, "invalid_label"),
+            ({**base, "edges": [[1, 2], [5, 5, "x" * 25]]}, "invalid_label"),
+            ({**base, "edges": [[1, 2], [5, True]]}, "invalid_edge_index"),
+            ({**base, "nodes": ["One", "Two", "Three", "<unsafe>"]}, "invalid_label"),
+            ({**base, "edges": [[1, 2], [3, 4], [2, 5]]}, "disconnected_graph"),
+            ({**base, "edges": [[1, 2], [2, 1], [2, 5]]}, "cyclic_graph"),
+            ({**base, "edges": [[1, 2], [1, 2, "different"], [2, 5]]}, "conflicting_edge"),
+            ({**base, "edges": [[5, 6], [3, 3]]}, "no_usable_edges"),
+            ({**GRAPH, "edges": GRAPH["edges"] + [{"from": "Z", "to": "A", "style": "red"}]},
+             "invalid_edge_fields"),
+            ({**GRAPH, "edges": GRAPH["edges"] + [{"from": "Z", "to": "A", "label": "<unsafe>"}]},
+             "invalid_label"),
+        ]
+        for value, reason in cases:
+            with self.subTest(reason=reason), self.assertRaisesRegex(DiagramInputError, "^" + reason + "$"):
+                parse_diagram_json(json.dumps(value))
 
     def test_unicode_and_label_bounds(self):
         value = copy.deepcopy(GRAPH)

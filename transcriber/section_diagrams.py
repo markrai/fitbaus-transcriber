@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import hashlib
 import hmac
 import json
@@ -7,7 +7,7 @@ import sys
 import time
 
 from .diagram_parser import parse_flowchart
-from .diagram_json import INPUT_VERSION, DiagramInputError, parse_diagram_json
+from .diagram_json import INPUT_VERSION, DiagramInputError, parse_diagram_result
 from .section_plan import ready_window
 from .summaries import SummaryError, SummaryRequest, authorize_interval, section_snapshot, PROMPT_VERSION, SYSTEM_PROMPT
 from .summary_cache import SummaryCache, SummaryCacheError, cache_key
@@ -129,7 +129,8 @@ def generate_diagram(request, token, runner, provider, config, guard, *,
         started = time.monotonic()
         try:
             raw = provider.complete(DIAGRAM_PROMPT, summary)
-            mermaid, graph = parse_diagram_json(raw)
+            result = parse_diagram_result(raw)
+            mermaid, graph = result.mermaid, result.graph
         except DiagramInputError as error:
             elapsed = int((time.monotonic() - started) * 1000)
             print(f"section_diagram validation_rejected reason={error} elapsed_ms={elapsed}",
@@ -138,6 +139,9 @@ def generate_diagram(request, token, runner, provider, config, guard, *,
         except (ValueError, UnicodeError):
             raise SummaryError("invalid_diagram", 502) from None
         elapsed = int((time.monotonic() - started) * 1000)
+        if result.stats.changed:
+            fields = " ".join(f"{name}={count}" for name, count in asdict(result.stats).items())
+            print(f"section_diagram normalized {fields}", file=sys.stderr, flush=True)
         print(f"section_diagram validated elapsed_ms={elapsed}", file=sys.stderr, flush=True)
     response = request.response(state="ready", cache_hit=cached is not None, mermaid=mermaid, graph=graph)
     if len(json.dumps(response, ensure_ascii=True).encode("utf-8")) > MAX_RESPONSE_BYTES:

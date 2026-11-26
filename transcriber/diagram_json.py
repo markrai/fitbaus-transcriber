@@ -1,10 +1,13 @@
+from dataclasses import dataclass
 import json
 import re
 
 from .diagram_parser import MAX_EDGES, MAX_NODES, MAX_SOURCE_BYTES, _label, parse_flowchart
 
 
-INPUT_VERSION = "compact-json-v2"
+INPUT_VERSION = "normalized-json-v3"
+MAX_INPUT_NODES = 24
+MAX_INPUT_EDGES = 48
 MAX_DEPTH = 8
 _ID = re.compile(r"[A-Z][A-Z0-9]{0,7}")
 
@@ -105,11 +108,41 @@ def _node_id(value):
     return value
 
 
-def _compact_graph(graph):
-    nodes, edges = graph["nodes"], graph["edges"]
+@dataclass(frozen=True)
+class _DecodedGraph:
+    direction: str
+    nodes: tuple[tuple[int | str, str], ...]
+    edges: tuple[tuple[int | str, int | str, str | None], ...]
+
+
+@dataclass(frozen=True)
+class NormalizationStats:
+    input_nodes: int
+    input_edges: int
+    removed_duplicate_nodes: int
+    removed_unknown_edges: int
+    removed_duplicate_edges: int
+    removed_self_loops: int
+    removed_isolated_nodes: int
+    output_nodes: int
+    output_edges: int
+
+    @property
+    def changed(self):
+        return self.input_nodes != self.output_nodes or self.input_edges != self.output_edges
+
+
+@dataclass(frozen=True)
+class DiagramResult:
+    mermaid: str
+    graph: dict
+    stats: NormalizationStats
+
+
+def _compact_graph(direction, nodes, edges):
     if not all(isinstance(node, str) for node in nodes):
         raise DiagramInputError("mixed_node_formats")
-    labels = {chr(65 + index): _safe_label(node, 64) for index, node in enumerate(nodes)}
+    labels = tuple((index, _safe_label(node, 64)) for index, node in enumerate(nodes, 1))
     links = []
     for edge in edges:
         if not isinstance(edge, list) or len(edge) not in (2, 3):
@@ -118,52 +151,32 @@ def _compact_graph(graph):
         if type(start) is not int or type(end) is not int:
             raise DiagramInputError("invalid_edge_index")
         label = _safe_label(edge[2], 24) if len(edge) == 3 else None
-        if not 1 <= start <= len(nodes) or not 1 <= end <= len(nodes):
-            raise DiagramInputError("unknown_endpoint")
-        links.append((chr(64 + start), chr(64 + end), label))
-    return labels, links
+        if start == 0 or end == 0:
+            raise DiagramInputError("ambiguous_index_base")
+        if start < 0 or end < 0:
+            raise DiagramInputError("invalid_edge_index")
+        links.append((start, end, label))
+    return _DecodedGraph(direction, labels, tuple(links))
 
 
-def _named_graph(graph):
-    labels, links = {}, []
-    for node in graph["nodes"]:
+def _named_graph(direction, nodes, edges):
+    labels, links = [], []
+    for node in nodes:
         if not isinstance(node, dict):
             raise DiagramInputError("invalid_node_type")
         if set(node) != {"id", "label"}:
             raise DiagramInputError("invalid_node_fields")
-        name = _node_id(node["id"])
-        label = _safe_label(node["label"], 64)
-        if name in labels and labels[name] != label:
-            raise DiagramInputError("conflicting_node")
-        labels[name] = label
-    for edge in graph["edges"]:
+        labels.append((_node_id(node["id"]), _safe_label(node["label"], 64)))
+    for edge in edges:
         if not isinstance(edge, dict) or set(edge) not in ({"from", "to"}, {"from", "to", "label"}):
             raise DiagramInputError("invalid_edge_fields")
         start, end = _node_id(edge["from"]), _node_id(edge["to"])
         label = _safe_label(edge["label"], 24) if "label" in edge else None
-        if start not in labels or end not in labels:
-            raise DiagramInputError("unknown_endpoint")
         links.append((start, end, label))
-    return labels, links
+    return _DecodedGraph(direction, tuple(labels), tuple(links))
 
 
-def _normalize(labels, links):
-    unique = {}
-    for start, end, label in links:
-        if start == end:
-            continue
-        pair = (start, end)
-        if pair in unique and unique[pair] != label:
-            raise DiagramInputError("conflicting_edge")
-        unique[pair] = label
-    if not unique:
-        raise DiagramInputError("no_usable_edges")
-    used = {node for pair in unique for node in pair}
-    labels = {name: label for name, label in labels.items() if name in used}
-    return labels, unique
-
-
-def parse_diagram_json(raw):
+def _decode(raw):
     graph = extract_object(raw)
     if not isinstance(graph, dict) or set(graph) not in ({"nodes", "edges"}, {"direction", "nodes", "edges"}):
         raise DiagramInputError("invalid_schema")
@@ -171,24 +184,73 @@ def parse_diagram_json(raw):
     nodes, edges = graph["nodes"], graph["edges"]
     if direction not in ("TD", "LR") or not isinstance(nodes, list) or not isinstance(edges, list):
         raise DiagramInputError("invalid_schema")
-    if not 2 <= len(nodes) <= MAX_NODES or not 1 <= len(edges) <= MAX_EDGES:
+    if not 2 <= len(nodes) <= MAX_INPUT_NODES or not 1 <= len(edges) <= MAX_INPUT_EDGES:
         raise DiagramInputError("invalid_cardinality")
     if isinstance(nodes[0], str):
-        labels, links = _compact_graph(graph)
-    else:
-        labels, links = _named_graph(graph)
-    labels, unique = _normalize(labels, links)
-    lines = ["flowchart " + direction]
+        return _compact_graph(direction, nodes, edges)
+    return _named_graph(direction, nodes, edges)
+
+
+def _normalize(decoded):
+    labels = {}
+    duplicate_nodes = 0
+    for name, label in decoded.nodes:
+        if name in labels:
+            if labels[name] != label:
+                raise DiagramInputError("conflicting_node")
+            duplicate_nodes += 1
+        else:
+            labels[name] = label
+
+    unique = {}
+    unknown_edges = duplicate_edges = self_loops = 0
+    for start, end, label in decoded.edges:
+        if start not in labels or end not in labels:
+            unknown_edges += 1
+            continue
+        if start == end:
+            self_loops += 1
+            continue
+        pair = (start, end)
+        if pair in unique:
+            if unique[pair] != label:
+                raise DiagramInputError("conflicting_edge")
+            duplicate_edges += 1
+        else:
+            unique[pair] = label
+    if not unique:
+        raise DiagramInputError("no_usable_edges")
+    used = {node for pair in unique for node in pair}
+    isolated_nodes = len(labels) - len(used)
+    labels = {name: label for name, label in labels.items() if name in used}
+    if not 2 <= len(labels) <= MAX_NODES or not 1 <= len(unique) <= MAX_EDGES:
+        raise DiagramInputError("output_cardinality")
+    stats = NormalizationStats(
+        len(decoded.nodes), len(decoded.edges), duplicate_nodes, unknown_edges,
+        duplicate_edges, self_loops, isolated_nodes, len(labels), len(unique),
+    )
+    return labels, unique, stats
+
+
+def parse_diagram_result(raw):
+    decoded = _decode(raw)
+    labels, unique, stats = _normalize(decoded)
+    names = {name: chr(64 + name) if isinstance(name, int) else name for name in labels}
+    lines = ["flowchart " + decoded.direction]
     for name, label in labels.items():
-        lines.append('{}["{}"]'.format(name, label))
+        lines.append('{}["{}"]'.format(names[name], label))
     for (start, end), label in unique.items():
         connector = ' -->|"{}"| '.format(label) if label is not None else " --> "
-        lines.append(start + connector + end)
+        lines.append(names[start] + connector + names[end])
     try:
-        return parse_flowchart("\n".join(lines))
-    except ValueError as error:
+        mermaid, graph = parse_flowchart("\n".join(lines))
+    except (ValueError, UnicodeError) as error:
         reason = {"Cyclic diagram": "cyclic_graph", "Disconnected diagram": "disconnected_graph"}.get(
             str(error), "invalid_graph")
         raise DiagramInputError(reason) from None
-    except UnicodeError:
-        raise DiagramInputError("invalid_graph") from None
+    return DiagramResult(mermaid, graph, stats)
+
+
+def parse_diagram_json(raw):
+    result = parse_diagram_result(raw)
+    return result.mermaid, result.graph
