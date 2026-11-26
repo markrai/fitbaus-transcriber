@@ -236,6 +236,7 @@ class Handler(BaseHTTPRequestHandler):
                 "summary_api": True,
                 "summary_provider_admin_probe_api": True,
                 "summary_provider_management_api": True,
+                "summary_lobo_trust_registry": True,
                 "recap_api": True,
                 "cumulative_recap_api": True,
                 "cumulative_recap_max_position_ms": MAX_POSITION_MS,
@@ -317,7 +318,7 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 manager.lock.release()
         if self.path in (ROOT + "/redeem", ROOT + "/discover", ROOT + "/test-candidate",
-                         ROOT + "/save", ROOT + "/disable", ROOT + "/cancel"):
+                         ROOT + "/save", ROOT + "/disable", ROOT + "/cancel", ROOT + "/forget-lobo"):
             return self._summary_management(self.path.rsplit("/", 1)[1])
         if self.path in ("/v1/admin/summary-provider/models", "/v1/admin/summary-provider/test"):
             return self._summary_admin_probe(self.path.endswith("/models"))

@@ -1,7 +1,6 @@
 from dataclasses import asdict, replace
 import hashlib
 import hmac
-import ipaddress
 import json
 import os
 from pathlib import Path
@@ -12,8 +11,8 @@ import subprocess
 import tempfile
 import threading
 import time
-from urllib.parse import urlsplit
 
+from .lobo_trust import lobo_endpoint, read_registry, remember_provider, pinned_provider
 from .pairing import ALPHABET, MAX_ATTEMPTS, TTL_SECONDS
 from .summary_provider import OpenAIChatProvider, SummaryProviderConfig
 
@@ -21,7 +20,7 @@ from .summary_provider import OpenAIChatProvider, SummaryProviderConfig
 ADMIN_HEADER = "X-FitBaus-Summary-Admin"
 ROOT = "/v1/admin/summary-provider"
 MAX_SETTINGS_BYTES = 65536
-LOBO_NETWORKS = tuple(ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+MAX_PERSISTED_SETTINGS_BYTES = 512 * 1024
 LOBO_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 PROBE_SYSTEM = "Summarize the supplied text in one sentence."
 PROBE_TEXT = "Regular aerobic exercise improves cardiovascular fitness."
@@ -40,14 +39,11 @@ def lobo_auth(pem):
 
 
 def lobo_ca(base_url, auth):
-    url = urlsplit(base_url)
     try:
-        ip = ipaddress.IPv4Address(url.hostname)
+        endpoint = lobo_endpoint(base_url)
     except (ValueError, TypeError):
         raise ManagementError("lobo_private_ipv4_required") from None
-    if (url.scheme != "https" or url.port != 7869 or url.path != "/v1"
-            or not any(ip in network for network in LOBO_NETWORKS)):
-        raise ManagementError("lobo_private_ipv4_required")
+    ip = endpoint.removeprefix("https://").split(":")[0]
     if not isinstance(auth, str) or not re.fullmatch(r"[A-Za-z0-9]{4}-?[A-Za-z0-9]{4}", auth):
         raise ManagementError("invalid_lobo_auth")
     try:
@@ -84,24 +80,54 @@ class SummarySettings:
     def __init__(self, directory):
         self.path = Path(directory) / "summary-provider.json"
 
-    def load(self, fallback):
+    def _read(self, fallback):
         if not self.path.exists():
-            return fallback
+            return fallback, {}
         with self.path.open("rb") as source:
-            raw = source.read(MAX_SETTINGS_BYTES + 1)
-        if len(raw) > MAX_SETTINGS_BYTES:
+            raw = source.read(MAX_PERSISTED_SETTINGS_BYTES + 1)
+        if len(raw) > MAX_PERSISTED_SETTINGS_BYTES:
             raise ValueError("Invalid saved summary settings")
         value = json.loads(raw)
-        if not isinstance(value, dict) or set(value) != {"version", "provider"} or value["version"] != 1:
+        if not isinstance(value, dict):
+            raise ValueError("Invalid saved summary settings")
+        version = value.get("version")
+        if type(version) is not int:
+            raise ValueError("Invalid saved summary settings")
+        if version == 1 and set(value) == {"version", "provider"}:
+            registry = {}
+        elif version == 2 and set(value) == {"version", "provider", "lobo_trust"}:
+            registry = read_registry(value["lobo_trust"])
+        else:
             raise ValueError("Invalid saved summary settings")
         provider = value["provider"]
-        return None if provider is None else SummaryProviderConfig(**provider)
+        return (None if provider is None else SummaryProviderConfig(**provider)), registry
 
-    def save(self, config):
+    def load(self, fallback):
+        return self._read(fallback)[0]
+
+    def trusted(self, current):
+        try:
+            _, registry = self._read(None)
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            return {}
+        entry = pinned_provider(current)
+        if entry is not None:
+            registry[entry[0]] = entry[1]
+        return registry
+
+    def save(self, config, previous=None, forget=None):
+        registry = self.trusted(previous)
+        if forget is not None:
+            registry.pop(forget, None)
+        try:
+            registry = remember_provider(registry, config)
+            registry = read_registry(registry)
+        except ValueError:
+            raise ManagementError("lobo_trust_registry_full_or_invalid", 409) from None
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        raw = json.dumps({"version": 1, "provider": asdict(config) if config else None},
+        raw = json.dumps({"version": 2, "provider": asdict(config) if config else None, "lobo_trust": registry},
                          ensure_ascii=True, separators=(",", ":")).encode("ascii")
-        if len(raw) > MAX_SETTINGS_BYTES:
+        if len(raw) > MAX_PERSISTED_SETTINGS_BYTES:
             raise ValueError("Invalid saved summary settings")
         fd, name = tempfile.mkstemp(prefix=".summary-provider-", dir=self.path.parent)
         try:
@@ -171,7 +197,20 @@ class SummaryManagement:
         with self.lock:
             self.require(token, device, guard)
             if action == "status":
-                return describe(current)
+                return {**describe(current), "trusted_lobo_endpoints": sorted(self.settings.trusted(current))}
+            if action == "forget-lobo":
+                if set(body) != {"base_url", "confirm"} or body["confirm"] is not True:
+                    raise ManagementError("confirmation_required")
+                endpoint = lobo_endpoint(body["base_url"])
+                entry = pinned_provider(current)
+                if entry is not None and entry[0] == endpoint:
+                    raise ManagementError("lobo_trust_active", 409)
+                self.require(token, device, guard)
+                self.settings.save(current, previous=current, forget=endpoint)
+                self.candidate = None
+                self.models = []
+                self.tested = None
+                return {**describe(current), "trusted_lobo_endpoints": sorted(self.settings.trusted(current))}
             if action == "cancel":
                 self.invalidate()
                 return {"cancelled": True}
@@ -179,7 +218,7 @@ class SummaryManagement:
                 self.candidate = None
                 self.models = []
                 self.tested = None
-                candidate = self.build_candidate(body, current)
+                candidate = self.build_candidate(body, current, self.settings.trusted(current))
                 models = OpenAIChatProvider(candidate).models()
                 self.require(token, device, guard)
                 self.candidate = candidate
@@ -211,13 +250,13 @@ class SummaryManagement:
             else:
                 raise ManagementError("invalid_request")
             self.require(token, device, guard)
-            self.settings.save(config)
+            self.settings.save(config, previous=current)
             activate(config, provider)
             self.invalidate()
             return describe(config)
 
     @staticmethod
-    def build_candidate(body, current):
+    def build_candidate(body, current, trusted=None):
         if body == {"use_current": True} and body["use_current"] is True:
             if current is None:
                 raise ManagementError("summary_provider_not_configured", 503)
@@ -239,7 +278,17 @@ class SummaryManagement:
         if kind == "lobo":
             if config.allow_http or config.api_key:
                 raise ManagementError("invalid_lobo_configuration")
-            config = replace(config, ca_pem=lobo_ca(config.base_url, body.get("lobo_auth")))
+            try:
+                endpoint = lobo_endpoint(config.base_url)
+            except (ValueError, TypeError):
+                raise ManagementError("lobo_private_ipv4_required") from None
+            if "lobo_auth" in body:
+                pem = lobo_ca(endpoint, body["lobo_auth"])
+            else:
+                pem = (trusted or {}).get(endpoint)
+                if pem is None:
+                    raise ManagementError("lobo_identity_verification_required", 409)
+            config = replace(config, ca_pem=pem)
         elif "lobo_auth" in body:
             raise ManagementError("invalid_request")
         return config
