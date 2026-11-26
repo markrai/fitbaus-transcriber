@@ -183,6 +183,7 @@ class SummaryManagement:
     def invalidate(self):
         with self.lock:
             self.code = None
+            self.code_deadline = 0
             self.deadline = 0
             self.remaining = 0
             self.grant = None
@@ -197,7 +198,7 @@ class SummaryManagement:
             self.invalidate()
             self.code = "".join(secrets.choice(ALPHABET) for _ in range(8))
             self.remaining = MAX_ATTEMPTS
-            self.deadline = self.clock() + TTL_SECONDS
+            self.code_deadline = self.clock() + TTL_SECONDS
             return {"code": self.code[:4] + "-" + self.code[4:], "expires_in": TTL_SECONDS}
 
     @staticmethod
@@ -206,7 +207,7 @@ class SummaryManagement:
 
     def redeem(self, code, device):
         with self.lock:
-            if not self.code or self.clock() >= self.deadline or self.remaining <= 0:
+            if not self.code or self.clock() >= self.code_deadline or self.remaining <= 0:
                 raise ManagementError("summary_admin_unavailable", 401)
             self.remaining -= 1
             if not isinstance(code, str) or not hmac.compare_digest(
@@ -228,9 +229,12 @@ class SummaryManagement:
         with self.lock:
             if not guard() or self.settings.admin_required():
                 raise ManagementError("summary_admin_unavailable", 401)
-            if self.grant and self.clock() < self.deadline and self.device != self.digest(device):
+            if self.admin_grant and self.grant and self.clock() < self.deadline and self.device != self.digest(device):
                 raise ManagementError("summary_busy", 409)
-            return self._grant(device, administrator=False)
+            pending_code = (self.code, self.code_deadline, self.remaining)
+            result = self._grant(device, administrator=False)
+            self.code, self.code_deadline, self.remaining = pending_code
+            return result
 
 
     def require(self, token, device, guard):
@@ -270,7 +274,9 @@ class SummaryManagement:
                 self.candidate = None
                 self.models = []
                 self.tested = None
-                return {**describe(current), "trusted_lobo_endpoints": sorted(self.settings.trusted(current)), "lobo_tofu_supported": True}
+                return {**describe(current), "trusted_lobo_endpoints": sorted(self.settings.trusted(current)),
+                        "lobo_tofu_supported": True, "admin_required": self.settings.admin_required(),
+                        "administrator": self.admin_grant}
             if action == "cancel":
                 self.invalidate()
                 return {"cancelled": True}
