@@ -145,7 +145,7 @@ The model is asked to return about six standalone concepts or meaningful short i
 Response echoes all nine request fields and includes:
 
 - `schema: "fitbaus.section-concepts/v1"`
-- `concept_prompt_version: "concepts-v1"`
+- `concept_prompt_version: "concepts-v2"` (asks for summary order; chronology is not validated, and the response retains model line order)
 - `concept_input_version: "plain-lines-v1"`
 - For HTTP 200, `state: "ready"`, Boolean `cache_hit` and `concepts`, an array of 1–10 bounded plain-text strings. No graph or Mermaid source.
 - For HTTP 202, `state: "deferred"` and `retry_after_seconds: 3`, without concepts.
