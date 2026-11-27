@@ -3,7 +3,7 @@ import threading
 import time
 
 from .audiobookshelf import SourceError
-from .background import PreparedSpec, profile
+from .background import PreparedSpec, heavy_profile, profile
 from .model import MODELS
 from .engine import ENGINE_ID, EngineError
 from .diagnostics import ENGINE_FAILURES, log_failure
@@ -62,7 +62,7 @@ class JobRunner:
         manifest = self.source.manifest(job.spec.identity.item_id, token)
         if manifest.identity != job.spec.identity:
             raise SourceError("stale_revision")
-        allowed = ({profile(name, self.engine.config) for name in MODELS}
+        allowed = ({heavy_profile(self.engine.config), *(profile(name, self.engine.config) for name in MODELS)}
                    if isinstance(job.spec, PreparedSpec) else {engine_profile(self.engine.config)})
         if job.spec.profile not in allowed:
             raise QueueError("profile_changed")

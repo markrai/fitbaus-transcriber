@@ -14,6 +14,7 @@ from .engine import EngineError, WhisperCpuEngine
 from .jobs import JobStore, QueueError
 from .runner import JobRunner
 from .background import BackgroundStore
+from .heavy_import import import_heavy, MAX_BUNDLE_BYTES
 from .model import MODELS, prepare_model, model_directory, model_present
 from .qualification import MAX_WAV_BYTES, inventory, qualify
 from .server import Service
@@ -62,6 +63,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="fitbaus-transcriber")
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("serve")
+    heavy = commands.add_parser("import-heavy")
+    heavy.add_argument("--token-stdin", action="store_true", required=True)
     commands.add_parser("check-config")
     commands.add_parser("doctor")
     source_check = commands.add_parser("check-source")
@@ -227,6 +230,12 @@ def main(argv=None):
                 route = "/v1/background/" + args.job_id
                 result = request("GET", route) if action == "status" else request("POST", route + "/" + action)
             print(json.dumps(result, indent=2))
+        elif args.command == "import-heavy":
+            token = source_credential(config, args.token_stdin)
+            raw = sys.stdin.read(MAX_BUNDLE_BYTES + 1)
+            result = import_heavy(BackgroundStore(config.data_dir / "background"),
+                                  Audiobookshelf(config.source), config.engine, token, raw)
+            print(json.dumps(result, separators=(",", ":")))
         elif args.command == "prepare-model":
             prepare_model(config.data_dir)
             print("Whisper CPU model prepared", file=sys.stderr)
