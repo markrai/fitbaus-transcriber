@@ -147,6 +147,34 @@ class OpenAIChatProvider:
             raise SummaryProviderError("invalid_completion") from None
         return content
 
+    def stream_elaboration(self, system, text, on_delta):
+        if self.config.model != "lobo-nano":
+            content = self.complete(system, text)
+            on_delta(content)
+            return content
+        if not system.strip() or not text.strip() or len(system.encode("utf-8")) + len(text.encode("utf-8")) > MAX_INPUT_BYTES:
+            raise ValueError("Invalid elaboration input")
+        payload = json.dumps({"prompt": text, "system": system,
+                              "maxOutputTokens": MAX_OUTPUT_TOKENS}, ensure_ascii=False).encode("utf-8")
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream", "Accept-Encoding": "identity"}
+        if self.config.api_key:
+            headers["Authorization"] = "Bearer " + self.config.api_key
+        request = Request(self.config.base_url + "/generate/stream", data=payload, headers=headers, method="POST")
+        deadline = time.monotonic() + self.config.timeout
+        try:
+            with self.opener.open(request, timeout=self.config.timeout) as response:
+                if (response.status != 200 or response.headers.get("Content-Encoding", "identity").lower() != "identity"
+                        or response.headers.get("Content-Type", "").split(";")[0].strip().lower() != "text/event-stream"):
+                    raise SummaryProviderError("invalid_response")
+                return read_lobo_elaboration(response, on_delta, deadline)
+        except HTTPError as error:
+            status = error.code
+            error.close()
+            code = {401: "provider_authentication", 403: "provider_authentication", 429: "provider_rate_limited"}.get(status, "provider_http_error")
+            raise SummaryProviderError(code) from None
+        except (OSError, URLError, HTTPException):
+            raise SummaryProviderError("provider_unavailable") from None
+
     def models(self):
         headers = {"Accept": "application/json", "Accept-Encoding": "identity"}
         if self.config.api_key:
@@ -190,3 +218,47 @@ class OpenAIChatProvider:
         except (OSError, URLError, HTTPException):
             raise SummaryProviderError("provider_unavailable") from None
         return body
+
+
+def read_lobo_elaboration(response, on_delta, deadline):
+    total = 0
+    content = ""
+    event = None
+    data = []
+    try:
+        while True:
+            if time.monotonic() >= deadline:
+                raise SummaryProviderError("provider_timeout")
+            raw = response.readline(MAX_RESPONSE_BYTES - total + 1)
+            total += len(raw)
+            if total > MAX_RESPONSE_BYTES:
+                raise SummaryProviderError("response_too_large")
+            if not raw:
+                raise SummaryProviderError("invalid_completion")
+            line = raw.decode("utf-8").rstrip("\r\n")
+            if line.startswith("event:"):
+                event = line[6:].strip()
+            elif line.startswith("data:"):
+                data.append(line[5:].lstrip(" "))
+            elif not line and data:
+                value = json.loads("\n".join(data))
+                if not isinstance(value, dict):
+                    raise ValueError()
+                if event == "text":
+                    delta = value.get("delta")
+                    if not isinstance(delta, str) or len(content) + len(delta) > MAX_OUTPUT_CHARS:
+                        raise ValueError()
+                    if delta:
+                        content += delta
+                        on_delta(delta)
+                elif event == "done":
+                    if type(value.get("finishReason")) is not int or value["finishReason"] != 0 or not content.strip():
+                        raise SummaryProviderError("invalid_completion")
+                    return content.strip()
+                elif event == "error":
+                    raise SummaryProviderError("provider_unavailable")
+                else:
+                    raise ValueError()
+                event, data = None, []
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise SummaryProviderError("invalid_response") from None
