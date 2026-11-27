@@ -3,7 +3,7 @@ import tempfile
 import unittest
 
 from transcriber.section_concepts import (
-    ConceptCache, ConceptInputError, ConceptRequest, MAX_CONCEPTS, MAX_CONCEPT_LENGTH,
+    CONCEPT_PROMPT, ConceptCache, ConceptInputError, ConceptRequest, MAX_CONCEPTS, MAX_CONCEPT_LENGTH,
     _cached_concepts, parse_concepts,
 )
 from transcriber.summary_cache import SummaryCacheError
@@ -17,6 +17,12 @@ class ConceptTests(unittest.TestCase):
             "Dopamine", "Anticipation motivates action", "Wanting versus liking",
             "Expected rewards reinforce habits",
         ])
+
+    def test_ordering_is_a_prompt_instruction_not_a_validation_requirement(self):
+        self.assertIn("List the ideas in the order they appear in the summary.", CONCEPT_PROMPT)
+        values = ["Third idea", "First idea", "Second idea"]
+        self.assertEqual(parse_concepts("\n".join(values)), values)
+        self.assertEqual(_cached_concepts(json.dumps(values)), values)
 
     def test_fenced_unicode_and_disjointed_ideas(self):
         raw = "```text\n# Main ideas\n- 未来の選択\n- الرغبة والمتعة\n- Cafe\u0301\n- Café\n```"
@@ -64,7 +70,7 @@ class ConceptTests(unittest.TestCase):
                     summary_prompt_version="section-v1", summary_digest="c" * 64)
         response = ConceptRequest.parse(body).response(state="deferred", retry_after_seconds=3)
         self.assertEqual(response["schema"], "fitbaus.section-concepts/v1")
-        self.assertEqual(response["concept_prompt_version"], "concepts-v1")
+        self.assertEqual(response["concept_prompt_version"], "concepts-v2")
         self.assertEqual(response["concept_input_version"], "plain-lines-v1")
         for key, value in body.items():
             self.assertEqual(response[key], value)
