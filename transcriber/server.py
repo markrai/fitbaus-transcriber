@@ -136,12 +136,15 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _json(self, status, data):
-        if self.path in ("/v1/section-diagrams", "/v1/section-concepts"):
-            kind = "section_diagram" if self.path == "/v1/section-diagrams" else "section_concepts"
+        if getattr(self, "_elaboration_stream_started", False):
+            self._elaboration_event(data if status == 200 else {"state": "error", "error": data.get("error", "unavailable")})
+            return
+        if self.path in ("/v1/section-diagrams", "/v1/section-concepts", "/v1/concept-elaboration", "/v1/concept-elaboration/stream"):
+            kind = {"/v1/section-diagrams": "section_diagram", "/v1/section-concepts": "section_concepts"}.get(self.path, "concept_elaboration")
             code = data.get("error")
             if code in ("diagram_parent_unavailable", "invalid_diagram", "diagram_cache_unavailable",
                         "diagram_response_too_large", "concept_parent_unavailable", "invalid_concepts",
-                        "concept_cache_unavailable", "concept_response_too_large",
+                        "concept_cache_unavailable", "concept_response_too_large", "invalid_elaboration",
                         "provider_authentication", "provider_rate_limited",
                         "provider_http_error", "provider_unavailable", "provider_timeout",
                         "response_too_large", "invalid_response", "invalid_completion",
@@ -265,6 +268,7 @@ class Handler(BaseHTTPRequestHandler):
                 "summary_diagram_formats": ["flowchart"],
                 "summary_concept_api": True,
                 "concept_elaboration_api": True,
+                "concept_elaboration_stream_api": True,
                 "summary_provider_admin_probe_api": True,
                 "summary_provider_management_api": True,
                 "summary_provider_selection_api": True,
@@ -366,6 +370,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._summary_admin_probe(self.path.endswith("/models"))
         if self.path == "/v1/section-plan":
             return self._section_plan_request()
+        if self.path == "/v1/concept-elaboration/stream":
+            return self._section_visualization_request(concepts=True, elaboration=True, streaming=True)
         if self.path == "/v1/concept-elaboration":
             return self._section_visualization_request(concepts=True, elaboration=True)
         if self.path in ("/v1/section-diagrams", "/v1/section-concepts"):
@@ -580,7 +586,23 @@ class Handler(BaseHTTPRequestHandler):
             202 if result["state"] in ("pending_transcript", "pending_summary") else 200)
         return self._json(status, result)
 
-    def _section_visualization_request(self, concepts, elaboration=False):
+    def _elaboration_event(self, value):
+        self.wfile.write(json.dumps(value, separators=(",", ":")).encode("utf-8") + b"\n")
+        self.wfile.flush()
+
+    def _elaboration_delta(self, request, delta):
+        if not getattr(self, "_elaboration_stream_started", False):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            self._elaboration_stream_started = True
+            self._elaboration_event(request.response(state="streaming"))
+        self._elaboration_event({"state": "delta", "text": delta})
+
+    def _section_visualization_request(self, concepts, elaboration=False, streaming=False):
         token = self._source_token()
         if token is None:
             return
@@ -614,7 +636,9 @@ class Handler(BaseHTTPRequestHandler):
                 dispatch_allowed=service.summary_slot.diagram_dispatch_allowed)
             if elaboration:
                 result = generate_elaboration(request, token, service.runner, provider, config, guard,
-                                              concept_cache=service.concept_cache, **options)
+                                              concept_cache=service.concept_cache,
+                                              on_delta=(lambda delta: self._elaboration_delta(request, delta)) if streaming else None,
+                                              **options)
             elif concepts:
                 result = generate_concepts(request, token, service.runner, provider, config, guard,
                                            concept_cache=service.concept_cache, **options)
