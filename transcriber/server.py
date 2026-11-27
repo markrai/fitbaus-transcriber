@@ -253,6 +253,7 @@ class Handler(BaseHTTPRequestHandler):
                 "model_quota_mib": self.server.config.model_quota_mib,
                 "job_api": True,
                 "background_job_api": True,
+                "superior_transcript_availability": True,
                 "prepared_transcripts": True,
                 "unattended_background_local": True,
                 "background_job_lifetime_authorization": True,
@@ -697,7 +698,8 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "list":
                 manifest = background.runner.source.manifest(identifier, token)
                 result = {"jobs": [background.status(job) for job in background.store.for_item(
-                    manifest.identity.source_id, manifest.identity.item_id)]}
+                    manifest.identity.source_id, manifest.identity.item_id)],
+                    "superior_transcript": background.store.superior_for_item(manifest, background.config)}
             elif action == "status":
                 job = background.store.get(identifier)
                 background.authorize(job, token, exact=False)
@@ -781,6 +783,7 @@ class Handler(BaseHTTPRequestHandler):
             "worker_unavailable": 503, "queue_storage_error": 503,
             "background_not_found": 404, "background_full": 429, "background_storage_full": 409,
             "background_not_discardable": 409, "background_busy": 409,
+            "superior_transcript_available": 409, "external_transcript_read_only": 409,
             "background_storage_error": 503, "background_disk_full": 409, "model_not_prepared": 409,
             "model_not_qualified": 409, "resource_unavailable": 503, "qualification_unavailable": 503,
         }

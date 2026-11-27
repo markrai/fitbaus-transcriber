@@ -156,6 +156,27 @@ class BackgroundStore:
                         name, model_profile, duration, start, start, time.time_ns()))
         return job
 
+    def superior_for_item(self, manifest, config):
+        identity = manifest.identity
+        duration = manifest.duration_ms
+        with self.transaction() as db:
+            row = db.execute("""
+                SELECT b.* FROM books b
+                WHERE b.source_id=? AND b.item_id=? AND b.revision=?
+                    AND b.model=? AND b.profile=? AND b.duration_ms=?
+                    AND b.start_ms=0 AND b.cursor_ms=b.duration_ms AND b.state='completed'
+                    AND (SELECT count(*) FROM windows w WHERE w.parent_id=b.id
+                         AND w.start_ms>=0 AND w.start_ms<b.duration_ms
+                         AND w.start_ms % ?=0 AND w.end_ms=min(w.start_ms+?,b.duration_ms))=?
+                LIMIT 1
+            """, (identity.source_id, identity.item_id, identity.audio_revision,
+                  HEAVY_MODEL, heavy_profile(config), duration, MAX_WINDOW_MS, MAX_WINDOW_MS,
+                  (duration + MAX_WINDOW_MS - 1) // MAX_WINDOW_MS)).fetchone()
+            if row is None:
+                return None
+            job = self.row(row)
+            return {**job.status(), "quality": "above_small", "origin": "external"}
+
     def for_item(self, source_id, item_id):
         with self.transaction() as db:
             return [self.row(row) for row in db.execute(
@@ -319,6 +340,8 @@ class Background:
             raise SourceError("stale_revision")
         self.check_model(name, require_memory=False)
         with self.lock:
+            if self.store.superior_for_item(manifest, self.config) is not None:
+                raise QueueError("superior_transcript_available")
             if self.closed:
                 raise QueueError("worker_unavailable")
             if guard is not None and not guard():
@@ -347,7 +370,13 @@ class Background:
 
     def action(self, job_id, token, action, *, refresh=None, guard=None):
         job = self.store.get(job_id)
-        self.authorize(job, token, exact=action in ("resume", "reauthorize"))
+        if job.model == HEAVY_MODEL:
+            self.authorize(job, token, exact=False)
+            raise QueueError("external_transcript_read_only")
+        manifest = self.authorize(job, token, exact=action in ("resume", "reauthorize"))
+        if action in ("resume", "reauthorize"):
+            if self.store.superior_for_item(manifest, self.config) is not None:
+                raise QueueError("superior_transcript_available")
         if action == "resume" and job.state not in ("completed", "cancelled"):
             self.check_model(job.model, require_memory=False)
         with self.lock:
