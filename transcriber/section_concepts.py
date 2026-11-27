@@ -200,7 +200,7 @@ class ElaborationRequest:
 
 
 def generate_elaboration(request, token, runner, provider, config, guard, *,
-                         summary_cache, concept_cache, source_url, provider_current, dispatch_allowed):
+                         summary_cache, concept_cache, source_url, provider_current, dispatch_allowed, on_delta=None):
     def verify():
         if not provider_current():
             raise SummaryError("concept_parent_unavailable", 409)
@@ -216,7 +216,16 @@ def generate_elaboration(request, token, runner, provider, config, guard, *,
     verify()
     if not dispatch_allowed():
         return request.response(state="deferred", retry_after_seconds=3)
-    explanation = provider.complete(ELABORATION_PROMPT, request.concept)
+    if on_delta is None:
+        explanation = provider.complete(ELABORATION_PROMPT, request.concept)
+    else:
+        def publish(delta):
+            if not provider_current() or (guard is not None and not guard()):
+                raise SummaryError("concept_parent_unavailable", 409)
+            if any(unicodedata.category(ch).startswith("C") and ch not in "\n\r\t" for ch in delta):
+                raise SummaryError("invalid_elaboration", 502)
+            on_delta(delta)
+        explanation = provider.stream_elaboration(ELABORATION_PROMPT, request.concept, publish)
     if (not isinstance(explanation, str) or not explanation.strip()
             or len(explanation) > MAX_OUTPUT_CHARS
             or any(unicodedata.category(ch).startswith("C") and ch not in "\n\r\t" for ch in explanation)):
