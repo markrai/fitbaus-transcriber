@@ -70,3 +70,17 @@ class HeavyImportTest(unittest.TestCase):
         with self.assertRaises(QueueError):
             self.publish()
         self.assertEqual(json.loads(self.read().result)["cues"][0]["text"], "Large")
+
+    def test_superior_availability_requires_current_complete_coverage(self):
+        self.assertIsNone(self.store.superior_for_item(self.manifest, self.config))
+        published = self.publish()
+        available = self.store.superior_for_item(self.manifest, self.config)
+        self.assertEqual(available["model"], "large-v3")
+        self.assertEqual(available["quality"], "above_small")
+        self.assertEqual(available["origin"], "external")
+        self.assertEqual(available["processed_ms"], 301000)
+        self.assertIsNone(self.store.superior_for_item(
+            SimpleNamespace(identity=AudioIdentity("home", "book", "b" * 64), duration_ms=301000), self.config))
+        with self.store.transaction() as db:
+            db.execute("DELETE FROM windows WHERE parent_id=? AND start_ms=300000", (published["job_id"],))
+        self.assertIsNone(self.store.superior_for_item(self.manifest, self.config))
