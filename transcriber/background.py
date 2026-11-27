@@ -370,11 +370,11 @@ class Background:
 
     def action(self, job_id, token, action, *, refresh=None, guard=None):
         job = self.store.get(job_id)
-        manifest = self.authorize(job, token, exact=False)
         if job.model == HEAVY_MODEL:
+            self.authorize(job, token, exact=False)
             raise QueueError("external_transcript_read_only")
+        manifest = self.authorize(job, token, exact=action in ("resume", "reauthorize"))
         if action in ("resume", "reauthorize"):
-            self.authorize(job, token)
             if self.store.superior_for_item(manifest, self.config) is not None:
                 raise QueueError("superior_transcript_available")
         if action == "resume" and job.state not in ("completed", "cancelled"):
