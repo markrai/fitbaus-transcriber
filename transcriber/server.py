@@ -28,7 +28,8 @@ from .summaries import RecapRequest, SummaryError, SummaryRequest, authorize_int
 from .summary_cache import SummaryCache, SummaryCacheError
 from .provider_admission import ProviderAdmission
 from .section_diagrams import DiagramCache, DiagramRequest, generate_diagram
-from .section_concepts import ConceptCache, ConceptRequest, generate_concepts
+from .section_concepts import (ConceptCache, ConceptRequest, ElaborationRequest,
+                               generate_concepts, generate_elaboration)
 from .section_plan import SectionPlanRequest, section_plan
 from .cumulative_recap import CumulativeRecapRequest, cumulative_recap, MAX_POSITION_MS
 
@@ -263,6 +264,7 @@ class Handler(BaseHTTPRequestHandler):
                 "summary_diagram_api": True,
                 "summary_diagram_formats": ["flowchart"],
                 "summary_concept_api": True,
+                "concept_elaboration_api": True,
                 "summary_provider_admin_probe_api": True,
                 "summary_provider_management_api": True,
                 "summary_provider_selection_api": True,
@@ -364,6 +366,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._summary_admin_probe(self.path.endswith("/models"))
         if self.path == "/v1/section-plan":
             return self._section_plan_request()
+        if self.path == "/v1/concept-elaboration":
+            return self._section_visualization_request(concepts=True, elaboration=True)
         if self.path in ("/v1/section-diagrams", "/v1/section-concepts"):
             return self._section_visualization_request(concepts=self.path == "/v1/section-concepts")
         if self.path == "/v1/summaries":
@@ -576,7 +580,7 @@ class Handler(BaseHTTPRequestHandler):
             202 if result["state"] in ("pending_transcript", "pending_summary") else 200)
         return self._json(status, result)
 
-    def _section_visualization_request(self, concepts):
+    def _section_visualization_request(self, concepts, elaboration=False):
         token = self._source_token()
         if token is None:
             return
@@ -585,7 +589,7 @@ class Handler(BaseHTTPRequestHandler):
         if service.runner is None:
             return self._json(503, {"error": "worker_unavailable"})
         try:
-            request_type = ConceptRequest if concepts else DiagramRequest
+            request_type = ElaborationRequest if elaboration else (ConceptRequest if concepts else DiagramRequest)
             request = request_type.parse(self._body())
         except TimeoutError:
             return self._json(408, {"error": "request_timeout"})
@@ -608,7 +612,10 @@ class Handler(BaseHTTPRequestHandler):
                 summary_cache=service.summary_cache, source_url=service.config.source.base_url,
                 provider_current=lambda: service.summary_provider is provider and service.config.summary_provider is config,
                 dispatch_allowed=service.summary_slot.diagram_dispatch_allowed)
-            if concepts:
+            if elaboration:
+                result = generate_elaboration(request, token, service.runner, provider, config, guard,
+                                              concept_cache=service.concept_cache, **options)
+            elif concepts:
                 result = generate_concepts(request, token, service.runner, provider, config, guard,
                                            concept_cache=service.concept_cache, **options)
             else:
