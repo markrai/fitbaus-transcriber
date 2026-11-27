@@ -24,6 +24,12 @@ MAX_PARENTS = 32
 MAX_BOOK_MS = 100 * 60 * 60 * 1000
 MAX_STAGE_BYTES = 128 * 1024 * 1024
 REFRESH_COOLDOWN = 60
+HEAVY_MODEL = "large-v3"
+HEAVY_REVISION = "edaa852ec7e145841d8ffdb056a99866b5f0a478"
+
+
+def heavy_profile(config):
+    return "faster-whisper-1.2.1-large-v3-fp16-" + HEAVY_REVISION + "-beam5-segments-v1:" + (config.language or "auto")
 
 
 def profile(name, config):
@@ -153,8 +159,8 @@ class BackgroundStore:
     def for_item(self, source_id, item_id):
         with self.transaction() as db:
             return [self.row(row) for row in db.execute(
-                "SELECT * FROM books WHERE source_id=? AND item_id=? ORDER BY touched DESC",
-                (source_id, item_id))]
+                "SELECT * FROM books WHERE source_id=? AND item_id=? AND model<>? ORDER BY touched DESC",
+                (source_id, item_id, HEAVY_MODEL))]
 
     def transition(self, job_id, state, error=None):
         with self.transaction() as db:
@@ -212,16 +218,16 @@ class BackgroundStore:
             raise QueueError("background_storage_error") from None
 
     def find_prepared(self, spec, config):
-        profiles = tuple(profile(name, config) for name in ("small", "base", "tiny"))
+        profiles = (heavy_profile(config), *(profile(name, config) for name in ("small", "base", "tiny")))
         with self.transaction() as db:
             row = db.execute("""
                 SELECT b.*,w.start_ms AS window_start,w.end_ms AS window_end,w.result,w.prepared_id
                 FROM books b JOIN windows w ON w.parent_id=b.id
                 WHERE b.source_id=? AND b.item_id=? AND b.revision=? AND w.start_ms=? AND w.end_ms=?
-                    AND b.profile IN (?,?,?) AND w.end_ms<=b.cursor_ms
-                ORDER BY CASE b.profile WHEN ? THEN 0 WHEN ? THEN 1 ELSE 2 END,b.id LIMIT 1
+                    AND b.profile IN (?,?,?,?) AND w.end_ms<=b.cursor_ms
+                ORDER BY CASE b.profile WHEN ? THEN 0 WHEN ? THEN 1 WHEN ? THEN 2 ELSE 3 END,b.id LIMIT 1
             """, (spec.identity.source_id, spec.identity.item_id, spec.identity.audio_revision,
-                  spec.start_ms, spec.end_ms, *profiles, profiles[0], profiles[1])).fetchone()
+                  spec.start_ms, spec.end_ms, *profiles, *profiles[:3])).fetchone()
             return self.prepared(row)
 
     def get_prepared(self, job_id):
