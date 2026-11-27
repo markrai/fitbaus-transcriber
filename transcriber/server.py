@@ -138,6 +138,7 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, status, data):
         if getattr(self, "_elaboration_stream_started", False):
             self._elaboration_event(data if status == 200 else {"state": "error", "error": data.get("error", "unavailable")})
+            print(f"concept_elaboration stream_terminal status={status}", file=sys.stderr, flush=True)
             return
         if self.path in ("/v1/section-diagrams", "/v1/section-concepts", "/v1/concept-elaboration", "/v1/concept-elaboration/stream"):
             kind = {"/v1/section-diagrams": "section_diagram", "/v1/section-concepts": "section_concepts"}.get(self.path, "concept_elaboration")
