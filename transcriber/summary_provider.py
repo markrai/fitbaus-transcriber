@@ -230,6 +230,8 @@ def read_lobo_elaboration(response, on_delta, deadline):
             if time.monotonic() >= deadline:
                 raise SummaryProviderError("provider_timeout")
             raw = response.readline(MAX_RESPONSE_BYTES - total + 1)
+            if time.monotonic() >= deadline:
+                raise SummaryProviderError("provider_timeout")
             total += len(raw)
             if total > MAX_RESPONSE_BYTES:
                 raise SummaryProviderError("response_too_large")
