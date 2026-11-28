@@ -15,6 +15,7 @@ from .jobs import JobStore, QueueError
 from .runner import JobRunner
 from .background import BackgroundStore
 from .heavy_import import import_heavy, MAX_BUNDLE_BYTES
+from .visual_delivery import import_delivery, MAX_CANDIDATE_BYTES, DeliveryError
 from .model import MODELS, prepare_model, model_directory, model_present
 from .qualification import MAX_WAV_BYTES, inventory, qualify
 from .server import Service
@@ -65,6 +66,9 @@ def main(argv=None):
     commands.add_parser("serve")
     heavy = commands.add_parser("import-heavy")
     heavy.add_argument("--token-stdin", action="store_true", required=True)
+    visual = commands.add_parser("stage-visuals")
+    visual.add_argument("--token-stdin", action="store_true", required=True)
+    visual.add_argument("--candidate-id", required=True)
     commands.add_parser("check-config")
     commands.add_parser("doctor")
     source_check = commands.add_parser("check-source")
@@ -236,6 +240,13 @@ def main(argv=None):
             result = import_heavy(BackgroundStore(config.data_dir / "background"),
                                   Audiobookshelf(config.source), config.engine, token, raw)
             print(json.dumps(result, separators=(",", ":")))
+        elif args.command == "stage-visuals":
+            token = source_credential(config, args.token_stdin)
+            raw = sys.stdin.read(MAX_CANDIDATE_BYTES + 1).encode("ascii")
+            result = import_delivery(BackgroundStore(config.data_dir / "background"),
+                                     Audiobookshelf(config.source), config.engine, token, raw,
+                                     args.candidate_id)
+            print(json.dumps(result, separators=(",", ":")))
         elif args.command == "prepare-model":
             prepare_model(config.data_dir)
             print("Whisper CPU model prepared", file=sys.stderr)
@@ -279,7 +290,7 @@ def main(argv=None):
                     pass
                 finally:
                     signal.signal(signal.SIGTERM, previous)
-    except (SourceError, EngineError, QueueError) as error:
+    except (SourceError, EngineError, QueueError, DeliveryError) as error:
         print("Transcription failed: " + str(error), file=sys.stderr)
         return 1
     except (EOFError, KeyboardInterrupt, getpass.GetPassWarning):

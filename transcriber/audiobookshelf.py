@@ -14,6 +14,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 from .contract import AudioIdentity, MAX_TIME_MS
 
 MAX_METADATA_BYTES = 4 * 1024 * 1024
+MAX_EPUB_BYTES = 64 * 1024 * 1024
 MAX_TRACK_BYTES = 512 * 1024 * 1024
 MAX_TRACKS = 1000
 _ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
@@ -267,6 +268,66 @@ class Audiobookshelf:
             return parse_manifest(self.config, item_id, json.loads(data))
         except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
             raise SourceError("invalid_manifest") from None
+
+    def epub_metadata(self, item_id, file_id, token):
+        identifier(item_id)
+        identifier(file_id)
+        with self._get(f"/api/items/{item_id}?expanded=1", token) as response:
+            if response.headers.get_content_type() != "application/json":
+                raise SourceError("invalid_response")
+            raw = b"".join(self._chunks(response, MAX_METADATA_BYTES, time.monotonic() + 30))
+        try:
+            item = json.loads(raw)
+            if (item["id"] != item_id or item["mediaType"] != "book"
+                    or item.get("isMissing") or item.get("isInvalid")):
+                raise ValueError()
+            rows = item["libraryFiles"]
+            if not isinstance(rows, list) or len(rows) > 4096:
+                raise ValueError()
+            matches = [row for row in rows if row.get("ino") == file_id]
+            if len(matches) > 1:
+                raise ValueError()
+            primary = item["media"].get("ebookFile")
+            is_primary = primary is not None and primary.get("ino") == file_id
+            if is_primary:
+                matches.append(primary)
+            if not matches:
+                raise SourceError("not_found")
+            metadata = []
+            for row in matches:
+                meta = row["metadata"]
+                filename, ext = meta["filename"], meta["ext"]
+                if (not isinstance(filename, str) or not filename.lower().endswith(".epub")
+                        or not 1 <= len(filename) <= 255
+                        or any(ord(c) < 32 or c in "/\\" for c in filename)
+                        or not isinstance(ext, str) or ext.lower().removeprefix(".") != "epub"
+                        or row.get("fileType") not in (None, "ebook", "unknown", "text")
+                        or (is_primary and row.get("isSupplementary") is True)):
+                    raise ValueError()
+                metadata.append((filename, _integer(meta["size"], 1), _file_time(meta["mtimeMs"])))
+            if len(set(metadata)) != 1:
+                raise ValueError()
+            return metadata[0]
+        except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+            raise SourceError("invalid_companion") from None
+
+    def verify_epub(self, item_id, file_id, expected_digest, token):
+        before = self.epub_metadata(item_id, file_id, token)
+        size = before[1]
+        if size > MAX_EPUB_BYTES:
+            raise SourceError("size_limit")
+        digest = hashlib.sha256()
+        received = 0
+        with self._get(f"/api/items/{item_id}/file/{file_id}", token) as response:
+            length = response.headers.get("Content-Length")
+            if length is not None and length != str(size):
+                raise SourceError("stale_revision")
+            for chunk in self._chunks(response, size, time.monotonic() + 120):
+                received += len(chunk)
+                digest.update(chunk)
+        if (received != size or digest.hexdigest() != expected_digest
+                or self.epub_metadata(item_id, file_id, token) != before):
+            raise SourceError("stale_revision")
 
     @contextmanager
     def materialize_track(self, identity, file_id, token, directory, *, target=None):

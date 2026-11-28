@@ -102,6 +102,9 @@ class BackgroundStore:
                            (prepared_id(row["parent_id"], row["start_ms"], row["end_ms"]), row["parent_id"], row["start_ms"]))
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS prepared_window_id ON windows(prepared_id)")
             db.execute("CREATE INDEX IF NOT EXISTS prepared_book_identity ON books(source_id,item_id,revision)")
+            db.execute("""CREATE TABLE IF NOT EXISTS visual_candidates (
+                parent_id TEXT PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+                candidate_id TEXT NOT NULL, payload BLOB NOT NULL, payload_bytes INTEGER NOT NULL)""")
 
     @contextmanager
     def transaction(self):
