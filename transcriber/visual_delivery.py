@@ -205,7 +205,7 @@ def verify_transcript(db, job, value):
         digest_value.update(canonical(window.to_json()) + b"\n")
         for cue in window.cues:
             needed.discard((cue.start_ms, cue.end_ms, "within_exact_cue"))
-            if previous is not None:
+            if previous is not None and previous.end_ms <= cue.start_ms:
                 needed.discard((previous.start_ms, cue.end_ms, "between_adjacent_exact_cues"))
             previous = cue
         expected_start = end

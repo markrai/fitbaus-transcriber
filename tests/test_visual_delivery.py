@@ -1,4 +1,6 @@
 import base64
+from contextlib import contextmanager
+from types import SimpleNamespace
 import hashlib
 import json
 import struct
@@ -7,9 +9,9 @@ import zlib
 from unittest.mock import patch
 
 from transcriber.visual_delivery import DeliveryError, canonical, import_delivery, validate_candidate
-from transcriber.audiobookshelf import SourceError
+from transcriber.audiobookshelf import Audiobookshelf, SourceConfig, SourceError
 from transcriber.jobs import QueueError
-from test_heavy_import import HeavyImportTest
+import test_heavy_import
 
 
 def chunk(kind, data):
@@ -23,7 +25,7 @@ def png():
 
 class VisualDeliveryTests(unittest.TestCase):
     def setUp(self):
-        fixture = HeavyImportTest()
+        fixture = test_heavy_import.HeavyImportTest()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         self.fixture = fixture
@@ -116,6 +118,36 @@ class VisualDeliveryTests(unittest.TestCase):
         with self.assertRaises(DeliveryError):
             self.stage()
         self.assertIsNone(self.stored())
+
+
+class CompanionVerificationTests(unittest.TestCase):
+    def test_streams_only_selected_epub_and_rechecks_metadata(self):
+        source = Audiobookshelf(SourceConfig("home", "https://example.test"))
+        payload = b"example EPUB bytes"
+        calls = []
+        row = {"ino": "42", "fileType": "ebook",
+               "metadata": {"filename": "Book.epub", "ext": ".epub", "size": len(payload), "mtimeMs": 1}}
+        item = {"id": "book", "mediaType": "book", "media": {"ebookFile": row},
+                "libraryFiles": [row]}
+
+        @contextmanager
+        def get(path, token):
+            calls.append((path, token))
+            data = json.dumps(item).encode() if path.endswith("?expanded=1") else payload
+            headers = SimpleNamespace(get_content_type=lambda: "application/json",
+                                      get=lambda key: str(len(data)) if key == "Content-Length" else None)
+            yield SimpleNamespace(headers=headers, data=data)
+
+        with patch.object(source, "_get", side_effect=get), \
+                patch.object(source, "_chunks", side_effect=lambda response, *args: [response.data]):
+            source.verify_epub("book", "42", hashlib.sha256(payload).hexdigest(), "token")
+            self.assertEqual(calls, [("/api/items/book?expanded=1", "token"),
+                                     ("/api/items/book/file/42", "token"),
+                                     ("/api/items/book?expanded=1", "token")])
+            with self.assertRaisesRegex(SourceError, "stale_revision"):
+                source.verify_epub("book", "42", "a" * 64, "token")
+            with self.assertRaisesRegex(SourceError, "not_found"):
+                source.verify_epub("book", "43", "a" * 64, "token")
 
 
 if __name__ == "__main__":
